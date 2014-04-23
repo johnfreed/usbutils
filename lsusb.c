@@ -3341,8 +3341,8 @@ static void do_hub(libusb_device_handle *fd, unsigned tt_type, unsigned bcdUSB)
 				CTRL_TIMEOUT);
 		if (ret < 0) {
 			fprintf(stderr,
-				"cannot read port %d status, %s (%d)\n",
-				i + 1, strerror(errno), errno);
+				"cannot read port %d status, %s (%s)\n",
+				i + 1, libusb_error_name(ret), strerror(errno));
 			break;
 		}
 
@@ -3406,9 +3406,18 @@ static void do_dualspeed(libusb_device_handle *fd)
 			LIBUSB_REQUEST_GET_DESCRIPTOR,
 			USB_DT_DEVICE_QUALIFIER << 8, 0,
 			buf, sizeof buf, CTRL_TIMEOUT);
+#ifdef OS_LINUX
 	if (ret < 0 && errno != EPIPE)
-		perror("can't get device qualifier");
+		fprintf(stderr, "can't get device qualifier, %s (%s)\n",
+			libusb_error_name(ret), strerror(errno));
 
+#endif
+#ifdef OS_DARWIN
+	if (ret < 0 && errno != ENOENT && errno != ENOTTY)
+		fprintf(stderr, "can't get device qualifier, %s (%s)\n",
+			libusb_error_name(ret), strerror(errno));
+
+#endif
 	/* all dual-speed devices have a qualifier */
 	if (ret != sizeof buf
 			|| buf[0] != ret
@@ -3450,9 +3459,18 @@ static void do_debug(libusb_device_handle *fd)
 			LIBUSB_REQUEST_GET_DESCRIPTOR,
 			USB_DT_DEBUG << 8, 0,
 			buf, sizeof buf, CTRL_TIMEOUT);
+#ifdef OS_LINUX
 	if (ret < 0 && errno != EPIPE)
-		perror("can't get debug descriptor");
+		fprintf(stderr, "can't get debug descriptor, %s (%s)\n",
+			libusb_error_name(ret), strerror(errno));
 
+#endif
+#ifdef OS_DARWIN
+	if (ret < 0 && errno != ENOENT && errno != ENOTTY)
+		fprintf(stderr, "can't get debug descriptor, %s (%s)\n",
+			libusb_error_name(ret), strerror(errno));
+
+#endif
 	/* some high speed devices are also "USB2 debug devices", meaning
 	 * you can use them with some EHCI implementations as another kind
 	 * of system debug channel:  like JTAG, RS232, or a console.
@@ -3539,12 +3557,23 @@ dump_device_status(libusb_device_handle *fd, int otg, int wireless, int super_sp
 			0, 0,
 			status, 2,
 			CTRL_TIMEOUT);
+#ifdef OS_LINUX
 	if (ret < 0) {
 		fprintf(stderr,
-			"cannot read device status, %s (%d)\n",
-			strerror(errno), errno);
+			"cannot read device status, %s (%s)\n",
+			libusb_error_name(ret), strerror(errno));
 		return;
 	}
+#endif
+#ifdef OS_DARWIN
+	if (ret < 0) {
+		if (errno != ENOENT && errno != ENOTTY)
+			fprintf(stderr,
+				"cannot read device status, %s (%s)\n",
+				libusb_error_name(ret), strerror(errno));
+		return;
+	}
+#endif
 
 	printf("Device Status:     0x%02x%02x\n",
 			status[1], status[0]);
@@ -3597,9 +3626,9 @@ dump_device_status(libusb_device_handle *fd, int otg, int wireless, int super_sp
 			CTRL_TIMEOUT);
 	if (ret < 0) {
 		fprintf(stderr,
-			"cannot read wireless %s, %s (%d)\n",
+			"cannot read wireless %s, %s (%s)\n",
 			"status",
-			strerror(errno), errno);
+			libusb_error_name(ret), strerror(errno));
 		return;
 	}
 	printf("Wireless Status:     0x%02x\n", status[0]);
@@ -3620,9 +3649,9 @@ dump_device_status(libusb_device_handle *fd, int otg, int wireless, int super_sp
 			CTRL_TIMEOUT);
 	if (ret < 0) {
 		fprintf(stderr,
-			"cannot read wireless %s, %s (%d)\n",
+			"cannot read wireless %s, %s (%s)\n",
 			"channel info",
-			strerror(errno), errno);
+			libusb_error_name(ret), strerror(errno));
 		return;
 	}
 	printf("Channel Info:        0x%02x\n", status[0]);
@@ -3637,9 +3666,9 @@ dump_device_status(libusb_device_handle *fd, int otg, int wireless, int super_sp
 			CTRL_TIMEOUT);
 	if (ret < 0) {
 		fprintf(stderr,
-			"cannot read wireless %s, %s (%d)\n",
+			"cannot read wireless %s, %s (%s)\n",
 			"MAS info",
-			strerror(errno), errno);
+			libusb_error_name(ret), strerror(errno));
 		return;
 	}
 	printf("MAS Availability:    ");
@@ -3653,9 +3682,9 @@ dump_device_status(libusb_device_handle *fd, int otg, int wireless, int super_sp
 			CTRL_TIMEOUT);
 	if (ret < 0) {
 		fprintf(stderr,
-			"cannot read wireless %s, %s (%d)\n",
+			"cannot read wireless %s, %s (%s)\n",
 			"transmit power",
-			strerror(errno), errno);
+			libusb_error_name(ret), strerror(errno));
 		return;
 	}
 	printf("Transmit Power:\n");
