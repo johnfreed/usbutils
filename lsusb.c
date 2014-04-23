@@ -3248,7 +3248,7 @@ bad:
 
 /* ---------------------------------------------------------------------- */
 
-static void do_hub(libusb_device_handle *fd, unsigned tt_type, unsigned speed)
+static void do_hub(libusb_device_handle *fd, unsigned tt_type, unsigned bcdUSB)
 {
 	unsigned char buf[7 /* base descriptor */
 			+ 2 /* bitmasks */ * HUB_STATUS_BYTELEN];
@@ -3270,7 +3270,7 @@ static void do_hub(libusb_device_handle *fd, unsigned tt_type, unsigned speed)
 	};
 
 	/* USB 3.0 hubs have a slightly different descriptor */
-	if (speed == 0x0300)
+	if (bcdUSB == 0x0300)
 		value = 0x2A;
 	else
 		value = 0x29;
@@ -3317,7 +3317,7 @@ static void do_hub(libusb_device_handle *fd, unsigned tt_type, unsigned speed)
 			status[3], status[2],
 			status[1], status[0]);
 		/* CAPS are used to highlight "transient" states */
-		if (speed != 0x0300) {
+		if (bcdUSB != 0x0300) {
 			printf("%s%s%s%s%s",
 					(status[2] & 0x10) ? " C_RESET" : "",
 					(status[2] & 0x08) ? " C_OC" : "",
