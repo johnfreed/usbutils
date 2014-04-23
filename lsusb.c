@@ -251,6 +251,9 @@ static void dump_device(
 	char vendor[128], product[128];
 	char cls[128], subcls[128], proto[128];
 	char *mfg, *prod, *serial;
+#ifdef OS_DARWIN
+	char bcdUSB_flag[15];
+#endif
 
 	get_vendor_string(vendor, sizeof(vendor), descriptor->idVendor);
 	get_product_string(product, sizeof(product),
@@ -265,10 +268,27 @@ static void dump_device(
 	prod = get_dev_string(dev, descriptor->iProduct);
 	serial = get_dev_string(dev, descriptor->iSerialNumber);
 
+#ifdef OS_DARWIN
+	bcdUSB_flag[0] = '\0';
+	if (descriptor->bcdUSB == 0x0000)
+		strcpy(bcdUSB_flag, " (estimated)");
+		int devSpeed = libusb_get_device_speed(libusb_get_device(dev));
+		switch (devSpeed) {
+		case LIBUSB_SPEED_LOW:          descriptor->bcdUSB = 0x0110; break;
+		case LIBUSB_SPEED_FULL:         descriptor->bcdUSB = 0x0200; break;
+		case LIBUSB_SPEED_HIGH:         descriptor->bcdUSB = 0x0200; break;
+		case LIBUSB_SPEED_SUPER:        descriptor->bcdUSB = 0x0300; break;
+		default:                        descriptor->bcdUSB = 0x0110; /* if all else fails */
+		}
+#endif
 	printf("Device Descriptor:\n"
 	       "  bLength             %5u\n"
 	       "  bDescriptorType     %5u\n"
+#ifdef OS_DARWIN
+	       "  bcdUSB              %2x.%02x%s\n"
+#else
 	       "  bcdUSB              %2x.%02x\n"
+#endif
 	       "  bDeviceClass        %5u %s\n"
 	       "  bDeviceSubClass     %5u %s\n"
 	       "  bDeviceProtocol     %5u %s\n"
@@ -282,6 +302,9 @@ static void dump_device(
 	       "  bNumConfigurations  %5u\n",
 	       descriptor->bLength, descriptor->bDescriptorType,
 	       descriptor->bcdUSB >> 8, descriptor->bcdUSB & 0xff,
+#ifdef OS_DARWIN
+	       bcdUSB_flag,
+#endif
 	       descriptor->bDeviceClass, cls,
 	       descriptor->bDeviceSubClass, subcls,
 	       descriptor->bDeviceProtocol, proto,
@@ -3281,10 +3304,18 @@ static void do_hub(libusb_device_handle *fd, unsigned tt_type, unsigned bcdUSB)
 			value << 8, 0,
 			buf, sizeof buf, CTRL_TIMEOUT);
 	if (ret < 0) {
+#ifdef OS_LINUX
 		/* Linux returns EHOSTUNREACH for suspended devices */
 		if (errno != EHOSTUNREACH)
 			fprintf(stderr, "can't get hub descriptor, %s (%s)\n",
 				libusb_error_name(ret), strerror(errno));
+#endif
+#ifdef OS_DARWIN
+		/* Darwin returns ENOENT or ENOTTY for suspended devices */
+		if (errno != ENOENT && errno != ENOTTY)
+			fprintf(stderr, "can't get hub descriptor, %s (%s)\n",
+				libusb_error_name(ret), strerror(errno));
+#endif
 		return;
 	}
 	if (ret < 9 /* at least one port's bitmasks */) {
