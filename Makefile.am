@@ -1,8 +1,7 @@
 SUBDIRS = \
 	usbhid-dump
 
-AM_LDFLAGS = \
-	-Wl,--as-needed
+AM_LDFLAGS =
 
 data_DATA =
 
