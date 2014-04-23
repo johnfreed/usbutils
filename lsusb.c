@@ -3904,6 +3904,12 @@ static void dumpdev(libusb_device *dev)
 		do_dualspeed(udev);
 	}
 	do_debug(udev);
+#ifdef OS_DARWIN
+	if (desc.bcdUSB == 0x0000 ) {
+		if (libusb_get_device_speed(libusb_get_device(udev)) == LIBUSB_SPEED_SUPER)
+		desc.bcdUSB = 0x0300;
+	}
+#endif
 	dump_device_status(udev, otg, wireless, desc.bcdUSB >= 0x0300);
 	libusb_close(udev);
 }
