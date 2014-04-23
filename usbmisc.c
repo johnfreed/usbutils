@@ -39,6 +39,7 @@
 
 #include "usbmisc.h"
 
+#ifdef OS_LINUX
 /* ---------------------------------------------------------------------- */
 
 static const char *devbususb = "/dev/bus/usb";
@@ -143,9 +144,9 @@ libusb_device *get_usb_device(libusb_context *ctx, const char *path)
 		uint8_t bnum = libusb_get_bus_number(list[i]);
 		uint8_t dnum = libusb_get_device_address(list[i]);
 
-		snprintf(device_path, sizeof(device_path), "%s/%03u/%03u",
+		snprintf(device_path, sizeof(device_path) - 1, "%s/%03u/%03u",
 			 devbususb, bnum, dnum);
-		if (!strcmp(device_path, absolute_path)) {
+		if (strcmp(device_path, absolute_path) == 0) {
 			dev = list[i];
 			break;
 		}
@@ -154,14 +155,15 @@ libusb_device *get_usb_device(libusb_context *ctx, const char *path)
 	libusb_free_device_list(list, 0);
 	return dev;
 }
+#endif
 
 static char *get_dev_string_ascii(libusb_device_handle *dev, size_t size,
-                                  u_int8_t id)
+				  u_int8_t id)
 {
 	char *buf = malloc(size);
 	int ret = libusb_get_string_descriptor_ascii(dev, id,
-	                                             (unsigned char *) buf,
-	                                             size);
+						     (unsigned char *) buf,
+						     size);
 
 	if (ret < 0) {
 		free(buf);
@@ -172,10 +174,10 @@ static char *get_dev_string_ascii(libusb_device_handle *dev, size_t size,
 }
 
 #if defined(HAVE_NL_LANGINFO) && defined(HAVE_ICONV)
-static u_int16_t get_any_langid(libusb_device_handle *dev)
+static u_int16_t get_any_langid(libusb_device_handle *hdev)
 {
 	unsigned char buf[4];
-	int ret = libusb_get_string_descriptor(dev, 0, 0, buf, sizeof buf);
+	int ret = libusb_get_string_descriptor(hdev, 0, 0, buf, sizeof buf);
 	if (ret != sizeof buf) return 0;
 	return buf[2] | (buf[3] << 8);
 }
@@ -197,7 +199,7 @@ static char *usb_string_to_native(char * str, size_t len)
 	result = result_end = malloc(out_bytes_left + 1);
 
 	num_converted = iconv(conv, &str, &in_bytes_left,
-	                      &result_end, &out_bytes_left);
+			      &result_end, &out_bytes_left);
 
 	iconv_close(conv);
 	if (num_converted == (size_t) -1) {
@@ -210,7 +212,7 @@ static char *usb_string_to_native(char * str, size_t len)
 }
 #endif
 
-char *get_dev_string(libusb_device_handle *dev, u_int8_t id)
+char *get_dev_string(libusb_device_handle *hdev, u_int8_t id)
 {
 #if defined(HAVE_NL_LANGINFO) && defined(HAVE_ICONV)
 	int ret;
@@ -218,27 +220,95 @@ char *get_dev_string(libusb_device_handle *dev, u_int8_t id)
 	u_int16_t langid;
 #endif
 
-	if (!dev || !id) return strdup("");
+	if (!hdev || !id) return strdup("");
 
 #if defined(HAVE_NL_LANGINFO) && defined(HAVE_ICONV)
-	langid = get_any_langid(dev);
+	langid = get_any_langid(hdev);
 	if (!langid) return strdup("(error)");
 
-	ret = libusb_get_string_descriptor(dev, id, langid,
-	                                   (unsigned char *) unicode_buf,
-	                                   sizeof unicode_buf);
+	ret = libusb_get_string_descriptor(hdev, id, langid,
+					   (unsigned char *) unicode_buf,
+					   sizeof unicode_buf);
 	if (ret < 2) return strdup("(error)");
 
 	if (unicode_buf[0] < 2 || unicode_buf[1] != LIBUSB_DT_STRING)
 		return strdup("(error)");
 
 	buf = usb_string_to_native(unicode_buf + 2,
-	                           ((unsigned char) unicode_buf[0] - 2) / 2);
+				   ((unsigned char) unicode_buf[0] - 2) / 2);
 
-	if (!buf) return get_dev_string_ascii(dev, 127, id);
+	if (!buf) return get_dev_string_ascii(hdev, 127, id);
 
 	return buf;
 #else
-	return get_dev_string_ascii(dev, 127, id);
+	return get_dev_string_ascii(hdev, 127, id);
 #endif
 }
+
+#ifdef OS_DARWIN
+SInt32 GetSInt32CFProperty(io_service_t obj, CFStringRef key)
+{
+	SInt32 value = 0;
+
+	CFNumberRef valueRef = IORegistryEntryCreateCFProperty(obj, key, kCFAllocatorDefault, 0);
+	if (valueRef) {
+		CFNumberGetValue(valueRef, kCFNumberSInt32Type, &value);
+		CFRelease(valueRef);
+	}
+	return value;
+}
+
+UInt32 GetLocationID(io_service_t obj);
+
+UInt32 GetLocationID(io_service_t obj) {
+	return (UInt32) GetSInt32CFProperty(obj, CFSTR(kUSBDevicePropertyLocationID));
+}
+
+IOReturn darwin_get_service_from_location_id ( unsigned int location_id, io_service_t *service )
+{
+	io_iterator_t deviceIterator;
+	unsigned int found_location_id;
+
+	CFMutableDictionaryRef matchingDict = IOServiceMatching(kIOUSBDeviceClassName);
+
+	if (!matchingDict)
+		return kIOReturnError;
+
+	IOServiceGetMatchingServices(kIOMasterPortDefault, matchingDict, &deviceIterator);
+
+	while ((*service = IOIteratorNext (deviceIterator))) {
+		/* get the location from the i/o registry */
+
+		found_location_id = GetLocationID(*service);
+
+		if (location_id == found_location_id) {
+		  found_location_id = GetLocationID(*service);
+		  IOObjectRelease(deviceIterator);
+		  return kIOReturnSuccess;
+		}
+	}
+	/* not found, shouldn't happen */
+	IOObjectRelease(deviceIterator);
+	return kIOReturnError;
+}
+
+char *darwin_get_ioreg_string(io_service_t service, CFStringRef property) {
+	CFIndex length;
+	CFIndex maxSize;
+	char *buff;
+	CFStringRef cfBuff = (CFStringRef)IORegistryEntryCreateCFProperty (service, property, kCFAllocatorDefault, 0);
+	if (cfBuff) {
+	        length = CFStringGetLength(cfBuff);
+	        maxSize = CFStringGetMaximumSizeForEncoding(length, kCFStringEncodingUTF8);
+	        buff = (char *)malloc(maxSize);
+	        CFStringGetCString(cfBuff, buff, maxSize, kCFStringEncodingUTF8);
+	        CFRelease(cfBuff);
+	} else {
+	        buff = (char *)malloc(sizeof(char));
+	        memset(buff, '\0', sizeof(char));
+	}
+
+	return buff;
+}
+
+#endif /* OS_DARWIN */

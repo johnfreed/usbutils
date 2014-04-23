@@ -23,11 +23,21 @@
 
 #include <libusb.h>
 
+#ifdef OS_DARWIN
+#include <IOKit/IOCFBundle.h>
+#include <IOKit/usb/IOUSBLib.h>
+#endif
+
 /* ---------------------------------------------------------------------- */
 
 extern libusb_device *get_usb_device(libusb_context *ctx, const char *path);
+extern char *get_dev_string(libusb_device_handle *hdev, u_int8_t id);
 
-extern char *get_dev_string(libusb_device_handle *dev, u_int8_t id);
+#ifdef OS_DARWIN
+extern SInt32 GetSInt32CFProperty(io_service_t obj, CFStringRef key);
+extern IOReturn darwin_get_service_from_location_id ( unsigned int location_id, io_service_t *service );
+extern char *darwin_get_ioreg_string(io_service_t service, CFStringRef property);
+#endif /* OS_DARWIN */
 
 /* ---------------------------------------------------------------------- */
 #endif /* _USBMISC_H */
