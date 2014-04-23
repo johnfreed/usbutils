@@ -107,7 +107,9 @@
 
 #define	HUB_STATUS_BYTELEN	3	/* max 3 bytes status = hub + 23 ports */
 
+#ifdef OS_LINUX
 static const char procbususb[] = "/proc/bus/usb";
+#endif
 static unsigned int verblevel = VERBLEVEL_DEFAULT;
 static int do_report_desc = 1;
 static const char * const encryption_type[] = {
@@ -4052,9 +4054,11 @@ int main(int argc, char *argv[])
 				product = strtoul(cp, NULL, 16);
 			break;
 
+#ifdef OS_LINUX
 		case 'D':
 			devdump = optarg;
 			break;
+#endif
 
 		case '?':
 		default:
@@ -4073,8 +4077,10 @@ int main(int argc, char *argv[])
 			"  -d vendor:[product]\n"
 			"      Show only devices with the specified vendor and\n"
 			"      product ID numbers (in hexadecimal)\n"
+#ifdef OS_LINUX
 			"  -D device\n"
 			"      Selects which device lsusb will examine\n"
+#endif
 			"  -t, --tree\n"
 			"      Dump the physical USB device hierarchy as a tree\n"
 			"  -V, --version\n"
