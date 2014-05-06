@@ -113,6 +113,7 @@
 static const char procbususb[] = "/proc/bus/usb";
 #endif
 static unsigned int verblevel = VERBLEVEL_DEFAULT;
+static int readonly = 0;
 static int do_report_desc = 1;
 static const char * const encryption_type[] = {
 	"UNSECURE",
@@ -247,12 +248,14 @@ static void dump_junk(const unsigned char *buf, const char *indent, unsigned int
  * General config descriptor dump
  */
 
-static void dump_device(libusb_device *dev)
+static void dump_device(libusb_device *dev, libusb_device_handle *udev)
 {
 	struct libusb_device_descriptor descriptor;
 	char vendor[128], product[128];
 	char cls[128], subcls[128], proto[128];
-	char *mfg, *prod, *serial;
+	char mfg[128 * MB_CUR_MAX], prod[128 * MB_CUR_MAX], serial[128 * MB_CUR_MAX];
+	struct libusb_options *options;
+	struct libusb_os_options *os_options;
 #ifdef OS_DARWIN
 	char bcdUSB_flag[15];
 #endif
@@ -266,19 +269,30 @@ static void dump_device(libusb_device *dev)
 			descriptor.bDeviceClass, descriptor.bDeviceSubClass);
 	get_protocol_string(proto, sizeof(proto), descriptor.bDeviceClass,
 			descriptor.bDeviceSubClass, descriptor.bDeviceProtocol);
-	libusb_device_handle *udev = NULL;
-	int ret = libusb_open(dev, &udev);
-	if (ret) {
+	if (!udev) {
 		fprintf(stderr, "Couldn't open device, some information "
 			"will be missing\n");
-		udev = NULL;
 	}
-	mfg = get_dev_string(udev, descriptor.iManufacturer);
-	prod = get_dev_string(udev, descriptor.iProduct);
-	serial = get_dev_string(udev, descriptor.iSerialNumber);
-#ifdef OS_DARWIN
+
+
+#if defined(OS_LINUX)
+	get_string_from_cache(mfg, sizeof(mfg), dev, LIBUSB_DEVICE_S_MANUFACTURER);
+	get_string_from_cache(prod, sizeof(prod), dev, LIBUSB_DEVICE_S_PRODUCT);
+	get_string_from_cache(serial, sizeof(serial), dev, LIBUSB_DEVICE_S_SERIALNUMBER);
+#endif
+#if defined(OS_DARWIN)
+	get_string_from_cache(mfg, sizeof(mfg), dev, LIBUSB_DEVICE_S_MANUFACTURER);
+	get_string_from_cache(prod, sizeof(prod), dev, LIBUSB_DEVICE_S_PRODUCT);
+	get_string_from_cache(serial, sizeof(serial), dev, LIBUSB_DEVICE_S_SERIALNUMBER);
+#else
+	get_dev_string(mfg, sizeof(mfg), udev, descriptor.iManufacturer);
+	get_dev_string(prod, sizeof(prod), udev, descriptor.iProduct);
+	get_dev_string(serial, sizeof(serial), udev, descriptor.iSerialNumber);
+#endif
+
+#if defined(OS_DARWIN)
 	bcdUSB_flag[0] = '\0';
-	if (descriptor.bcdUSB == 0x0000)
+	if (descriptor.bcdUSB == 0x0000) {
 		strcpy(bcdUSB_flag, " (estimated)");
 		int devSpeed = libusb_get_device_speed(dev);
 		switch (devSpeed) {
@@ -288,6 +302,7 @@ static void dump_device(libusb_device *dev)
 		case LIBUSB_SPEED_SUPER:        descriptor.bcdUSB = 0x0300; break;
 		default:                        descriptor.bcdUSB = 0x0110; /* if all else fails */
 		}
+	}
 #endif
 	printf("Device Descriptor:\n"
 	       "  bLength             %5u\n"
@@ -323,10 +338,6 @@ static void dump_device(libusb_device *dev)
 	       descriptor.iProduct, prod,
 	       descriptor.iSerialNumber, serial,
 	       descriptor.bNumConfigurations);
-
-	free(mfg);
-	free(prod);
-	free(serial);
 }
 
 static void dump_wire_adapter(const unsigned char *buf)
@@ -387,12 +398,13 @@ static void dump_encryption_type(const unsigned char *buf)
 static void dump_association(libusb_device_handle *dev, const unsigned char *buf)
 {
 	char cls[128], subcls[128], proto[128];
-	char *func;
+	char func[128 * MB_CUR_MAX];
 
+	func[0] = '\0';
 	get_class_string(cls, sizeof(cls), buf[4]);
 	get_subclass_string(subcls, sizeof(subcls), buf[4], buf[5]);
 	get_protocol_string(proto, sizeof(proto), buf[4], buf[5], buf[6]);
-	func = get_dev_string(dev, buf[7]);
+	get_dev_string(func, sizeof(func), dev, buf[7]);
 
 	printf("    Interface Association:\n"
 	       "      bLength             %5u\n"
@@ -410,15 +422,15 @@ static void dump_association(libusb_device_handle *dev, const unsigned char *buf
 	       buf[6], proto,
 	       buf[7], func);
 
-	free(func);
 }
 
 static void dump_config(libusb_device_handle *dev, struct libusb_config_descriptor *config)
 {
-	char *cfg;
+	char cfg[128 * MB_CUR_MAX];
 	int i;
 
-	cfg = get_dev_string(dev, config->iConfiguration);
+	cfg[0] = '\0';
+	get_dev_string(cfg, sizeof(cfg), dev, config->iConfiguration);
 
 	printf("  Configuration Descriptor:\n"
 	       "    bLength             %5u\n"
@@ -433,8 +445,6 @@ static void dump_config(libusb_device_handle *dev, struct libusb_config_descript
 	       config->bNumInterfaces, config->bConfigurationValue,
 	       config->iConfiguration,
 	       cfg, config->bmAttributes);
-
-	free(cfg);
 
 	if (!(config->bmAttributes & 0x80))
 		printf("      (Missing must-be-set bit!)\n");
@@ -488,15 +498,18 @@ static void dump_config(libusb_device_handle *dev, struct libusb_config_descript
 static void dump_altsetting(libusb_device_handle *dev, const struct libusb_interface_descriptor *interface)
 {
 	char cls[128], subcls[128], proto[128];
-	char *ifstr;
+	char ifstr[128 * MB_CUR_MAX];
 
 	const unsigned char *buf;
 	unsigned size, i;
 
+	ifstr[0] = '\0';
+
 	get_class_string(cls, sizeof(cls), interface->bInterfaceClass);
 	get_subclass_string(subcls, sizeof(subcls), interface->bInterfaceClass, interface->bInterfaceSubClass);
 	get_protocol_string(proto, sizeof(proto), interface->bInterfaceClass, interface->bInterfaceSubClass, interface->bInterfaceProtocol);
-	ifstr = get_dev_string(dev, interface->iInterface);
+	get_dev_string(ifstr, sizeof(ifstr), dev, interface->iInterface);
+
 
 	printf("    Interface Descriptor:\n"
 	       "      bLength             %5u\n"
@@ -513,7 +526,12 @@ static void dump_altsetting(libusb_device_handle *dev, const struct libusb_inter
 	       interface->bInterfaceSubClass, subcls, interface->bInterfaceProtocol, proto,
 	       interface->iInterface, ifstr);
 
-	free(ifstr);
+	if (dev) {
+		unsigned char driver[128];
+		driver[0] = '\0';
+		libusb_get_kernel_driver_name(libusb_get_device(dev), interface->bInterfaceNumber, driver, sizeof(driver));
+		printf(        "    Interface Driver:           %s\n", driver); 
+	}
 
 	/* avoid re-ordering or hiding descriptors for display */
 	if (interface->extra_length) {
@@ -661,8 +679,9 @@ static void dump_interface(libusb_device_handle *dev, const struct libusb_interf
 {
 	int i;
 
-	for (i = 0; i < interface->num_altsetting; i++)
+	for (i = 0; i < interface->num_altsetting; i++) {
 		dump_altsetting(dev, &interface->altsetting[i]);
+	}
 }
 
 static void dump_pipe_desc(const unsigned char *buf)
@@ -1005,8 +1024,10 @@ static void dump_audiocontrol_interface(libusb_device_handle *dev, const unsigne
 		"External", "Internal fixed", "Internal variable", "Internal programmable"
 	};
 	unsigned int i, chcfg, j, k, N, termt, subtype;
-	char *chnames = NULL, *term = NULL, termts[128];
+	char chnames[128 * MB_CUR_MAX], term[128 * MB_CUR_MAX], termts[128];
 
+	chnames[0] = '\0';
+	term[0] = '\0';
 	if (buf[1] != USB_DT_CS_INTERFACE)
 		printf("      Warning: Invalid descriptor\n");
 	else if (buf[0] < 3)
@@ -1073,8 +1094,8 @@ static void dump_audiocontrol_interface(libusb_device_handle *dev, const unsigne
 
 		switch (protocol) {
 		case USB_AUDIO_CLASS_1:
-			chnames = get_dev_string(dev, buf[10]);
-			term = get_dev_string(dev, buf[11]);
+			get_dev_string(chnames, sizeof(chnames), dev, buf[10]);
+			get_dev_string(term, sizeof(term), dev, buf[11]);
 			if (buf[0] < 12)
 				printf("      Warning: Descriptor too short\n");
 			chcfg = buf[8] | (buf[9] << 8);
@@ -1093,8 +1114,8 @@ static void dump_audiocontrol_interface(libusb_device_handle *dev, const unsigne
 			dump_junk(buf, "        ", 12);
 			break;
 		case USB_AUDIO_CLASS_2:
-			chnames = get_dev_string(dev, buf[13]);
-			term = get_dev_string(dev, buf[16]);
+			get_dev_string(chnames, sizeof(chnames), dev, buf[13]);
+			get_dev_string(term, sizeof(term), dev, buf[16]);
 			if (buf[0] < 17)
 				printf("      Warning: Descriptor too short\n");
 			chcfg = buf[9] | (buf[10] << 8) | (buf[11] << 16) | (buf[12] << 24);
@@ -1123,7 +1144,7 @@ static void dump_audiocontrol_interface(libusb_device_handle *dev, const unsigne
 		printf("(OUTPUT_TERMINAL)\n");
 		switch (protocol) {
 		case USB_AUDIO_CLASS_1:
-			term = get_dev_string(dev, buf[8]);
+			get_dev_string(term, sizeof(term), dev, buf[8]);
 			termt = buf[4] | (buf[5] << 8);
 			get_audioterminal_string(termts, sizeof(termts), termt);
 			if (buf[0] < 9)
@@ -1137,7 +1158,7 @@ static void dump_audiocontrol_interface(libusb_device_handle *dev, const unsigne
 			dump_junk(buf, "        ", 9);
 			break;
 		case USB_AUDIO_CLASS_2:
-			term = get_dev_string(dev, buf[11]);
+			get_dev_string(term, sizeof(term), dev, buf[11]);
 			termt = buf[4] | (buf[5] << 8);
 			get_audioterminal_string(termts, sizeof(termts), termt);
 			if (buf[0] < 12)
@@ -1170,8 +1191,8 @@ static void dump_audiocontrol_interface(libusb_device_handle *dev, const unsigne
 			} else {
 				N = 1+(j*k-1)/8;
 			}
-			chnames = get_dev_string(dev, buf[8+j]);
-			term = get_dev_string(dev, buf[9+j+N]);
+			get_dev_string(chnames, sizeof(chnames), dev, buf[8+j]);
+			get_dev_string(term, sizeof(term), dev, buf[9+j+N]);
 			if (buf[0] < 10+j+N)
 				printf("      Warning: Descriptor too short\n");
 			chcfg = buf[6+j] | (buf[7+j] << 8);
@@ -1197,8 +1218,8 @@ static void dump_audiocontrol_interface(libusb_device_handle *dev, const unsigne
 		case USB_AUDIO_CLASS_2:
 			j = buf[4];
 			k = buf[0] - 13 - j;
-			chnames = get_dev_string(dev, buf[10+j]);
-			term = get_dev_string(dev, buf[12+j+k]);
+			get_dev_string(chnames, sizeof(chnames), dev, buf[10+j]);
+			get_dev_string(term, sizeof(term), dev, buf[12+j+k]);
 			chcfg =  buf[6+j] | (buf[7+j] << 8) | (buf[8+j] << 16) | (buf[9+j] << 24);
 
 			printf("        bUnitID             %5u\n"
@@ -1234,7 +1255,7 @@ static void dump_audiocontrol_interface(libusb_device_handle *dev, const unsigne
 		case USB_AUDIO_CLASS_1:
 			if (buf[0] < 6+buf[4])
 				printf("      Warning: Descriptor too short\n");
-			term = get_dev_string(dev, buf[5+buf[4]]);
+			get_dev_string(term, sizeof(term), dev, buf[5+buf[4]]);
 
 			printf("        bUnitID             %5u\n"
 			       "        bNrInPins           %5u\n",
@@ -1248,7 +1269,7 @@ static void dump_audiocontrol_interface(libusb_device_handle *dev, const unsigne
 		case USB_AUDIO_CLASS_2:
 			if (buf[0] < 7+buf[4])
 				printf("      Warning: Descriptor too short\n");
-			term = get_dev_string(dev, buf[6+buf[4]]);
+			get_dev_string(term, sizeof(term), dev, buf[6+buf[4]]);
 
 			printf("        bUnitID             %5u\n"
 			       "        bNrInPins           %5u\n",
@@ -1276,7 +1297,7 @@ static void dump_audiocontrol_interface(libusb_device_handle *dev, const unsigne
 			k = (buf[0] - 7) / j;
 			if (buf[0] < 7+buf[5]*k)
 				printf("      Warning: Descriptor too short\n");
-			term = get_dev_string(dev, buf[6+buf[5]*k]);
+			get_dev_string(term, sizeof(term), dev, buf[6+buf[5]*k]);
 			printf("        bUnitID             %5u\n"
 			       "        bSourceID           %5u\n"
 			       "        bControlSize        %5u\n",
@@ -1308,7 +1329,7 @@ static void dump_audiocontrol_interface(libusb_device_handle *dev, const unsigne
 				printf("        bmaControls(%2u)      0x%08x\n", i, chcfg);
 				dump_audio_bmcontrols("          ", chcfg, uac_fu_bmcontrols, protocol);
 			}
-			term = get_dev_string(dev, buf[5+k*4]);
+			get_dev_string(term, sizeof(term), dev, buf[5+k*4]);
 			printf("        iFeature            %5u %s\n", buf[5+(k*4)], term);
 			dump_junk(buf, "        ", 6+(k*4));
 			break;
@@ -1323,8 +1344,8 @@ static void dump_audiocontrol_interface(libusb_device_handle *dev, const unsigne
 		case USB_AUDIO_CLASS_1:
 			j = buf[6];
 			k = buf[11+j];
-			chnames = get_dev_string(dev, buf[10+j]);
-			term = get_dev_string(dev, buf[12+j+k]);
+			get_dev_string(chnames, sizeof(chnames), dev, buf[10+j]);
+			get_dev_string(term, sizeof(term), dev, buf[12+j+k]);
 			chcfg = buf[8+j] | (buf[9+j] << 8);
 			if (buf[0] < 13+j+k)
 				printf("      Warning: Descriptor too short\n");
@@ -1352,8 +1373,8 @@ static void dump_audiocontrol_interface(libusb_device_handle *dev, const unsigne
 		case USB_AUDIO_CLASS_2:
 			j = buf[6];
 			k = buf[0] - 17 - j;
-			chnames = get_dev_string(dev, buf[12+j]);
-			term = get_dev_string(dev, buf[15+j+k]);
+			get_dev_string(chnames, sizeof(chnames), dev, buf[12+j]);
+			get_dev_string(term, sizeof(term), dev, buf[15+j+k]);
 			chcfg =  buf[8+j] |
 				(buf[9+j] << 8) |
 				(buf[10+j] << 16) |
@@ -1389,8 +1410,8 @@ static void dump_audiocontrol_interface(libusb_device_handle *dev, const unsigne
 		case USB_AUDIO_CLASS_1:
 			j = buf[6];
 			k = buf[11+j];
-			chnames = get_dev_string(dev, buf[10+j]);
-			term = get_dev_string(dev, buf[12+j+k]);
+			get_dev_string(chnames, sizeof(chnames), dev, buf[10+j]);
+			get_dev_string(term, sizeof(term), dev, buf[12+j+k]);
 			chcfg = buf[8+j] | (buf[9+j] << 8);
 			if (buf[0] < 13+j+k)
 				printf("      Warning: Descriptor too short\n");
@@ -1417,8 +1438,8 @@ static void dump_audiocontrol_interface(libusb_device_handle *dev, const unsigne
 			break;
 		case USB_AUDIO_CLASS_2:
 			j = buf[6];
-			chnames = get_dev_string(dev, buf[13+j]);
-			term = get_dev_string(dev, buf[15+j]);
+			get_dev_string(chnames, sizeof(chnames), dev, buf[13+j]);
+			get_dev_string(term, sizeof(term), dev, buf[15+j]);
 			chcfg = buf[9+j] | (buf[10+j] << 8) | (buf[11+j] << 16) | (buf[12+j] << 24);
 			if (buf[0] < 16+j)
 				printf("      Warning: Descriptor too short\n");
@@ -1461,7 +1482,7 @@ static void dump_audiocontrol_interface(libusb_device_handle *dev, const unsigne
 		printf("        bmControls           0x%02x\n", buf[5]);
 		dump_audio_bmcontrols("          ", buf[5], uac2_clock_source_bmcontrols, protocol);
 
-		term = get_dev_string(dev, buf[7]);
+		get_dev_string(term, sizeof(term), dev, buf[7]);
 		printf("        bAssocTerminal      %5u\n", buf[6]);
 		printf("        iClockSource        %5u %s\n", buf[7], term);
 		dump_junk(buf, "        ", 8);
@@ -1474,7 +1495,7 @@ static void dump_audiocontrol_interface(libusb_device_handle *dev, const unsigne
 
 		if (buf[0] < 7+buf[4])
 			printf("      Warning: Descriptor too short\n");
-		term = get_dev_string(dev, buf[6+buf[4]]);
+		get_dev_string(term, sizeof(term), dev, buf[6+buf[4]]);
 
 		printf("        bUnitID             %5u\n"
 		       "        bNrInPins           %5u\n",
@@ -1504,7 +1525,7 @@ static void dump_audiocontrol_interface(libusb_device_handle *dev, const unsigne
 		printf("        bmControls           0x%02x\n", buf[5]);
 		dump_audio_bmcontrols("          ", buf[5], uac2_clock_multiplier_bmcontrols, protocol);
 
-		term = get_dev_string(dev, buf[6]);
+		get_dev_string(term, sizeof(term), dev, buf[6]);
 		printf("        iClockMultiplier    %5u %s\n", buf[6], term);
 		dump_junk(buf, "        ", 7);
 		break;
@@ -1517,7 +1538,7 @@ static void dump_audiocontrol_interface(libusb_device_handle *dev, const unsigne
 		if (buf[0] < 8)
 			printf("      Warning: Descriptor too short\n");
 
-		term = get_dev_string(dev, buf[7]);
+		get_dev_string(term, sizeof(term), dev, buf[7]);
 		printf("        bUnitID             %5u\n"
 		       "        bSourceID           %5u\n"
 		       "        bCSourceInID        %5u\n"
@@ -1533,7 +1554,7 @@ static void dump_audiocontrol_interface(libusb_device_handle *dev, const unsigne
 		if (buf[0] < 16)
 			printf("      Warning: Descriptor too short\n");
 		k = (buf[0] - 16) / 4;
-		term = get_dev_string(dev, buf[15+k*4]);
+		get_dev_string(term, sizeof(term), dev, buf[15+k*4]);
 		printf("        bUnitID             %5u\n"
 		       "        wEffectType         %5u\n"
 		       "        bSourceID           %5u\n",
@@ -1557,8 +1578,6 @@ static void dump_audiocontrol_interface(libusb_device_handle *dev, const unsigne
 		break;
 	}
 
-	free(chnames);
-	free(term);
 }
 
 static const struct bmcontrol uac2_as_interface_bmcontrols[] = {
@@ -1578,8 +1597,9 @@ static void dump_audiostreaming_interface(libusb_device_handle *dev, const unsig
 		"IEC1937_MPEG-2_Layer1_LS", "IEC1937_MPEG-2_Layer2/3_LS" };
 	unsigned int i, j, fmttag;
 	const char *fmtptr = "undefined";
-	char *name = NULL;
+	char name[128 * MB_CUR_MAX];
 
+	name[0] = '\0';
 	if (buf[1] != USB_DT_CS_INTERFACE)
 		printf("      Warning: Invalid descriptor\n");
 	else if (buf[0] < 3)
@@ -1633,7 +1653,7 @@ static void dump_audiostreaming_interface(libusb_device_handle *dev, const unsig
 				if ((j >> i) & 1)
 					printf("          %s\n", chconfig_uac2[i]);
 
-			name = get_dev_string(dev, buf[15]);
+			get_dev_string(name, sizeof(buf), dev, buf[15]);
 			printf("        iChannelNames       %5u %s\n", buf[15], name);
 			dump_junk(buf, "        ", 16);
 			break;
@@ -1894,7 +1914,6 @@ static void dump_audiostreaming_interface(libusb_device_handle *dev, const unsig
 		break;
 	}
 
-	free(name);
 }
 
 static const struct bmcontrol uac2_audio_endpoint_bmcontrols[] = {
@@ -1958,10 +1977,11 @@ static void dump_audiostreaming_endpoint(const unsigned char *buf, int protocol)
 static void dump_midistreaming_interface(libusb_device_handle *dev, const unsigned char *buf)
 {
 	static const char * const jacktypes[] = {"Undefined", "Embedded", "External"};
-	char *jackstr = NULL;
+	char jackstr[128 * MB_CUR_MAX];
 	unsigned int j, tlength, capssize;
 	unsigned long caps;
 
+	jackstr[0] = '\0';
 	if (buf[1] != USB_DT_CS_INTERFACE)
 		printf("      Warning: Invalid descriptor\n");
 	else if (buf[0] < 3)
@@ -1987,7 +2007,7 @@ static void dump_midistreaming_interface(libusb_device_handle *dev, const unsign
 		printf("(MIDI_IN_JACK)\n");
 		if (buf[0] < 6)
 			printf("      Warning: Descriptor too short\n");
-		jackstr = get_dev_string(dev, buf[5]);
+		get_dev_string(jackstr, sizeof(jackstr), dev, buf[5]);
 		printf("        bJackType           %5u %s\n"
 		       "        bJackID             %5u\n"
 		       "        iJack               %5u %s\n",
@@ -2011,7 +2031,7 @@ static void dump_midistreaming_interface(libusb_device_handle *dev, const unsign
 			       j, buf[2*j+6], j, buf[2*j+7]);
 		}
 		j = 6+buf[5]*2; /* midi10.pdf says, incorrectly: 5+2*p */
-		jackstr = get_dev_string(dev, buf[j]);
+		get_dev_string(jackstr, sizeof(jackstr), dev, buf[j]);
 		printf("        iJack               %5u %s\n",
 		       buf[j], jackstr);
 		dump_junk(buf, "        ", j+1);
@@ -2065,7 +2085,7 @@ static void dump_midistreaming_interface(libusb_device_handle *dev, const unsign
 		if (caps & 0x800)
 			printf("          DLS2 (Downloadable Sounds Level 2)\n");
 		j = 9+2*buf[4]+capssize;
-		jackstr = get_dev_string(dev, buf[j]);
+		get_dev_string(jackstr, sizeof(jackstr), dev, buf[j]);
 		printf("        iElement            %5u %s\n", buf[j], jackstr);
 		dump_junk(buf, "        ", j+1);
 		break;
@@ -2076,7 +2096,6 @@ static void dump_midistreaming_interface(libusb_device_handle *dev, const unsign
 		break;
 	}
 
-	free(jackstr);
 }
 
 static void dump_midistreaming_endpoint(const unsigned char *buf)
@@ -2123,7 +2142,9 @@ static void dump_videocontrol_interface(libusb_device_handle *dev, const unsigne
 		"None", "NTSC - 525/60", "PAL - 625/50", "SECAM - 625/50",
 		"NTSC - 625/50", "PAL - 525/60" };
 	unsigned int i, ctrls, stds, n, p, termt, freq;
-	char *term = NULL, termts[128];
+	char term[128 * MB_CUR_MAX], termts[128];
+
+	term[0] = '\0';
 
 	if (buf[1] != USB_DT_CS_INTERFACE)
 		printf("      Warning: Invalid descriptor\n");
@@ -2154,7 +2175,7 @@ static void dump_videocontrol_interface(libusb_device_handle *dev, const unsigne
 
 	case 0x02:  /* INPUT_TERMINAL */
 		printf("(INPUT_TERMINAL)\n");
-		term = get_dev_string(dev, buf[7]);
+		get_dev_string(term, sizeof(term), dev, buf[7]);
 		termt = buf[4] | (buf[5] << 8);
 		n = termt == 0x0201 ? 7 : 0;
 		get_videoterminal_string(termts, sizeof(termts), termt);
@@ -2187,7 +2208,7 @@ static void dump_videocontrol_interface(libusb_device_handle *dev, const unsigne
 
 	case 0x03:  /* OUTPUT_TERMINAL */
 		printf("(OUTPUT_TERMINAL)\n");
-		term = get_dev_string(dev, buf[8]);
+		get_dev_string(term, sizeof(term), dev, buf[8]);
 		termt = buf[4] | (buf[5] << 8);
 		get_audioterminal_string(termts, sizeof(termts), termt);
 		if (buf[0] < 9)
@@ -2206,7 +2227,7 @@ static void dump_videocontrol_interface(libusb_device_handle *dev, const unsigne
 		p = buf[4];
 		if (buf[0] < 6+p)
 			printf("      Warning: Descriptor too short\n");
-		term = get_dev_string(dev, buf[5+p]);
+		get_dev_string(term, sizeof(term), dev, buf[5+p]);
 
 		printf("        bUnitID             %5u\n"
 		       "        bNrInPins           %5u\n",
@@ -2221,7 +2242,7 @@ static void dump_videocontrol_interface(libusb_device_handle *dev, const unsigne
 	case 0x05:  /* PROCESSING_UNIT */
 		printf("(PROCESSING_UNIT)\n");
 		n = buf[7];
-		term = get_dev_string(dev, buf[8+n]);
+		get_dev_string(term, sizeof(term), dev, buf[8+n]);
 		if (buf[0] < 10+n)
 			printf("      Warning: Descriptor too short\n");
 		printf("        bUnitID             %5u\n"
@@ -2248,7 +2269,7 @@ static void dump_videocontrol_interface(libusb_device_handle *dev, const unsigne
 		printf("(EXTENSION_UNIT)\n");
 		p = buf[21];
 		n = buf[22+p];
-		term = get_dev_string(dev, buf[23+p+n]);
+		get_dev_string(term, sizeof(term), dev, buf[23+p+n]);
 		if (buf[0] < 24+p+n)
 			printf("      Warning: Descriptor too short\n");
 		printf("        bUnitID             %5u\n"
@@ -2273,7 +2294,6 @@ static void dump_videocontrol_interface(libusb_device_handle *dev, const unsigne
 		break;
 	}
 
-	free(term);
 }
 
 static void dump_videostreaming_interface(const unsigned char *buf)
@@ -2988,8 +3008,10 @@ static char *
 dump_comm_descriptor(libusb_device_handle *dev, const unsigned char *buf, char *indent)
 {
 	int		tmp;
-	char		*str = NULL;
+	char		str[128 * MB_CUR_MAX];
 	char		*type;
+
+	str[0] = '\0';
 
 	switch (buf[2]) {
 	case 0:
@@ -3055,7 +3077,7 @@ dump_comm_descriptor(libusb_device_handle *dev, const unsigned char *buf, char *
 		type = "Country Selection";
 		if (buf[0] < 6 || (buf[0] & 1) != 0)
 			goto bad;
-		str = get_dev_string(dev, buf[3]);
+		get_dev_string(str, sizeof(str), dev, buf[3]);
 		printf("%sCountry Selection:\n"
 		       "%s  iCountryCodeRelDate     %4d %s\n",
 		       indent,
@@ -3087,7 +3109,7 @@ dump_comm_descriptor(libusb_device_handle *dev, const unsigned char *buf, char *
 		type = "Network Channel Terminal";
 		if (buf[0] != 7)
 			goto bad;
-		str = get_dev_string(dev, buf[4]);
+		get_dev_string(str, sizeof(str), dev, buf[4]);
 		printf("%sNetwork Channel Terminal:\n"
 		       "%s  bEntityId               %3d\n"
 		       "%s  iName                   %3d %s\n"
@@ -3109,7 +3131,7 @@ dump_comm_descriptor(libusb_device_handle *dev, const unsigned char *buf, char *
 		type = "Ethernet";
 		if (buf[0] != 13)
 			goto bad;
-		str = get_dev_string(dev, buf[3]);
+		get_dev_string(str, sizeof(str), dev, buf[3]);
 		tmp = buf[7] << 8;
 		tmp |= buf[6]; tmp <<= 8;
 		tmp |= buf[5]; tmp <<= 8;
@@ -3187,7 +3209,7 @@ dump_comm_descriptor(libusb_device_handle *dev, const unsigned char *buf, char *
 		type = "Command Set";
 		if (buf[0] != 22)
 			goto bad;
-		str = get_dev_string(dev, buf[5]);
+		get_dev_string(str, sizeof(str), dev, buf[5]);
 		printf("%sCDC Command Set:\n"
 		       "%s  bcdVersion           %x.%02x\n"
 		       "%s  iCommandSet          %4d %s\n"
@@ -3267,7 +3289,6 @@ dump_comm_descriptor(libusb_device_handle *dev, const unsigned char *buf, char *
 		return "unrecognized comm descriptor";
 	}
 
-	free(str);
 
 	return 0;
 
@@ -3314,7 +3335,7 @@ static void do_hub(libusb_device_handle *fd, unsigned tt_type, unsigned bcdUSB)
 	if (ret < 0) {
 #ifdef OS_LINUX
 		/* Linux returns EHOSTUNREACH for suspended devices */
-		if (errno != EHOSTUNREACH)
+		if (errno != EHOSTUNREACH && !readonly)
 			fprintf(stderr, "can't get hub descriptor, %s (%s)\n",
 				libusb_error_name(ret), strerror(errno));
 #endif
@@ -3413,7 +3434,7 @@ static void do_dualspeed(libusb_device_handle *fd)
 			USB_DT_DEVICE_QUALIFIER << 8, 0,
 			buf, sizeof buf, CTRL_TIMEOUT);
 #ifdef OS_LINUX
-	if (ret < 0 && errno != EPIPE)
+	if (ret < 0 && ret != LIBUSB_ERROR_PIPE && !readonly)
 		fprintf(stderr, "can't get device qualifier, %s (%s)\n",
 			libusb_error_name(ret), strerror(errno));
 
@@ -3466,7 +3487,7 @@ static void do_debug(libusb_device_handle *fd)
 			USB_DT_DEBUG << 8, 0,
 			buf, sizeof buf, CTRL_TIMEOUT);
 #ifdef OS_LINUX
-	if (ret < 0 && errno != EPIPE)
+	if (ret < 0 && ret != LIBUSB_ERROR_PIPE && !readonly)
 		fprintf(stderr, "can't get debug descriptor, %s (%s)\n",
 			libusb_error_name(ret), strerror(errno));
 
@@ -3563,11 +3584,13 @@ dump_device_status(libusb_device_handle *fd, int otg, int wireless, int super_sp
 			0, 0,
 			status, 2,
 			CTRL_TIMEOUT);
+
 #ifdef OS_LINUX
-	if (ret < 0) {
-		fprintf(stderr,
-			"cannot read device status, %s (%s)\n",
-			libusb_error_name(ret), strerror(errno));
+	if (ret < 0 ) {
+		if (!readonly)
+			fprintf(stderr,
+				"cannot read device status, %s (%s)\n",
+				libusb_error_name(ret), strerror(errno));
 		return;
 	}
 #endif
@@ -3891,11 +3914,11 @@ static void dumpdev(libusb_device *dev, libusb_device_handle *udev)
 	struct libusb_device_descriptor desc;
 	int i, ret;
 	int otg, wireless;
-
 	otg = wireless = 0;
 
+	dump_device(dev, udev);
 	libusb_get_device_descriptor(dev, &desc);
-	dump_device(dev);
+
 	if (desc.bcdUSB == 0x0250)
 		wireless = do_wireless(udev);
 	if (desc.bNumConfigurations) {
@@ -3941,11 +3964,11 @@ static void dumpdev(libusb_device *dev, libusb_device_handle *udev)
 	}
 #endif
 	dump_device_status(udev, otg, wireless, desc.bcdUSB >= 0x0300);
-	libusb_close(udev);
 }
 
 /* ---------------------------------------------------------------------- */
 
+#ifdef OS_LINUX
 static int dump_one_device(libusb_context *ctx, const char *path)
 {
 	libusb_device *dev;
@@ -3954,12 +3977,14 @@ static int dump_one_device(libusb_context *ctx, const char *path)
 	char vendor[128], product[128];
 	int ret;
 
-	dev = linux_get_usb_device(ctx, path);
+	linux_get_usb_device(dev, ctx, path);
 	if (!dev) {
 		fprintf(stderr, "Cannot find %s\n", path);
 		return 1;
 	}
+	/* for lsusb -D */
 	ret = libusb_open(dev, &udev);
+
 	if (ret) {
 		fprintf(stderr, "Couldn't open device, some information "
 			"will be missing\n");
@@ -3974,8 +3999,11 @@ static int dump_one_device(libusb_context *ctx, const char *path)
 					       vendor,
 					       product);
 	dumpdev(dev, udev);
+	if (udev)
+		libusb_close(udev);
 	return 0;
 }
+#endif
 
 static int list_devices(libusb_context *ctx, int busnum, int devnum, int vendorid, int productid)
 {
@@ -4010,10 +4038,57 @@ static int list_devices(libusb_context *ctx, int busnum, int devnum, int vendori
 		if (get_vendor_string(vendor, sizeof(vendor), dev) == 0)
 			strcpy(vendor, "Unknown Vendor");
 
-		ret = libusb_open(dev, &udev);
+		/* for lsusb (no options) */
+		struct libusb_options *options;
+		struct libusb_os_options *os_options;
+
+		libusb_get_options(NULL,&options, &os_options);
+
+		options->open_from_cache = readonly;
+
+#if defined(OS_DARWIN)
+		os_options->optionB = 100;
+#elif defined(OS_LINUX)
+		os_options->optionA = 100;
+#endif
+		os_options->optionC = 50;
+		/* for lsusb and lsusb -v */
+		ret = libusb_open_extended(dev, &udev, options, os_options);
+
 		if (ret) {
 			udev = NULL;
 		}
+		if (udev)
+		{
+#if defined(OS_DARWIN)
+			os_options->optionB = 75;
+#elif defined(OS_LINUX)
+			os_options->optionA = 75;
+#endif
+			os_options->optionC = 25;
+			libusb_set_options(udev,NULL,os_options);
+			if (readonly) {
+#if defined(OS_DARWIN)
+				/* uncomment the next line if you want to see the effect of setting options */
+				//fprintf(stderr,"Trying to change optionB to 75 and optionC to 25. ");
+#elif defined(OS_LINUX)
+				/* uncomment the next line if you want to see the effect of setting options */
+				//fprintf(stderr,"Trying to change optionA to 75 and optionC to 25. ");
+#endif
+			}
+			libusb_get_options(udev,NULL, &os_options);
+			if (readonly) {
+#if defined(OS_DARWIN)
+				/* uncomment the next line if you want to see the effect of setting options */
+				//fprintf(stderr,"Returned optionB at %d and optionC at %d\n", os_options->optionB, os_options->optionC);
+#elif defined(OS_LINUX)
+				/* uncomment the next line if you want to see the effect of setting options */
+				//fprintf(stderr,"Returned optionA at %d and optionC at %d\n", os_options->optionA, os_options->optionC);
+#endif
+			}
+		}
+		libusb_free_options(options, os_options);
+
 		if (get_product_string(product, sizeof(product), dev) == 0) {
 			if (desc.bDeviceClass > 0 && desc.bDeviceClass < 0xff) {
 				/* print subclass (unless "Unused") and class */
@@ -4036,6 +4111,10 @@ static int list_devices(libusb_context *ctx, int busnum, int devnum, int vendori
 				vendor, product);
 		if (verblevel > 0)
 			dumpdev(dev, udev);
+		if (udev) {
+			libusb_close(udev);
+		}
+		libusb_unref_device(dev);
 	}
 
 	libusb_free_device_list(list, 0);
@@ -4048,13 +4127,16 @@ error:
 
 int main(int argc, char *argv[])
 {
+
 	static const struct option long_options[] = {
 		{ "version", 0, 0, 'V' },
 		{ "verbose", 0, 0, 'v' },
 		{ "help", 0, 0, 'h' },
 		{ "tree", 0, 0, 't' },
+		{ "read-only", 0, 0, 'r' },
 		{ 0, 0, 0, 0 }
 	};
+
 	libusb_context *ctx;
 	int c, err = 0;
 	unsigned int treemode = 0;
@@ -4066,7 +4148,7 @@ int main(int argc, char *argv[])
 
 	setlocale(LC_CTYPE, "");
 
-	while ((c = getopt_long(argc, argv, "D:vtP:p:s:d:Vh",
+	while ((c = getopt_long(argc, argv, "D:vtP:p:s:d:Vhr",
 			long_options, NULL)) != EOF) {
 		switch (c) {
 		case 'V':
@@ -4082,6 +4164,10 @@ int main(int argc, char *argv[])
 
 		case 't':
 			treemode = 1;
+			break;
+
+		case 'r':
+			readonly = 1;
 			break;
 
 		case 's':
@@ -4169,10 +4255,14 @@ int main(int argc, char *argv[])
 		return EXIT_FAILURE;
 	}
 
+#ifdef OS_LINUX
 	if (devdump)
 		status = dump_one_device(ctx, devdump);
 	else
 		status = list_devices(ctx, bus, devnum, vendor, product);
+#else
+	status = list_devices(ctx, bus, devnum, vendor, product);
+#endif
 
 	names_exit();
 	libusb_exit(ctx);

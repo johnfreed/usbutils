@@ -20,7 +20,9 @@
 #define MY_PATH_MAX 4096
 #define MY_PARAM_MAX 64
 
+#ifdef OS_LINUX
 #define SBUD "/sys/bus/usb/devices/"
+#endif
 
 static void sort_dev_strings(char *dev_strings[],  int cnt )
 {
@@ -47,6 +49,13 @@ static unsigned int get_maxchild(unsigned int location_id)
 {
 /* nNbrPorts in Hub Descriptor */
 	unsigned int maxchild;
+#ifdef OS_DARWIN
+	io_service_t service;
+        darwin_get_service_from_location_id(location_id, &service);
+	maxchild = (UInt32) GetSInt32CFProperty(service, CFSTR("Ports"));
+        return maxchild;
+#endif
+#ifdef OS_LINUX
 	/* build path */
 	unsigned int mask;
 	unsigned int busnum;
@@ -93,11 +102,48 @@ static unsigned int get_maxchild(unsigned int location_id)
 	buf[sizeof(buf) - 1] = '\0';
 	maxchild = (unsigned int)strtoul(buf, NULL, 10);
 	return maxchild;
+#endif
 }
 
 
 static void get_driver(char **driver, unsigned int location_id, int ifnum)
 {
+#ifdef OS_DARWIN
+	io_service_t service;
+	io_registry_entry_t child;
+	kern_return_t kr;
+	CFIndex length;
+	CFIndex maxSize;
+	CFStringRef cfBuff;
+
+	strcpy(*driver, "Unknown");
+
+	kr = darwin_get_service_from_location_id(location_id, &service);
+	if (kr) {
+		fprintf(stderr, "Failed to find device 0x%08x\n",location_id);
+		return;
+	}
+
+	kr = IORegistryEntryGetChildEntry(service, kIOServicePlane, &child);
+	if (kr) {
+		fprintf(stderr, "Failed to find driver\n");
+		return;
+	}
+
+
+	cfBuff = (CFStringRef)IORegistryEntryCreateCFProperty (child, CFSTR("IOClass"), kCFAllocatorDefault, 0);
+	if (cfBuff) {
+		length = CFStringGetLength(cfBuff);
+		maxSize = CFStringGetMaximumSizeForEncoding(length, kCFStringEncodingUTF8);
+		char *utf_buff = malloc(maxSize);
+		CFStringGetCString(cfBuff, utf_buff, maxSize, kCFStringEncodingUTF8);
+		CFRelease(cfBuff);
+		strncpy(*driver, utf_buff, MY_STRING_MAX);
+		free(utf_buff);
+	}
+
+#endif
+#ifdef OS_LINUX
 	/* build path */
 	unsigned int mask;
 	unsigned int busnum;
@@ -157,6 +203,7 @@ read_driver:
 				snprintf(*driver, MY_STRING_MAX, "%s", p + 1);
 		}
 	}
+#endif
 }
 
 
@@ -317,3 +364,4 @@ int lsusb_t(void)
 	libusb_exit(NULL);
 	return 0;
 }
+

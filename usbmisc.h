@@ -32,17 +32,23 @@
 #define MY_PATH_MAX 4096
 #define MY_PARAM_MAX 64
 
+#ifdef OS_LINUX
 #define SBUD "/sys/bus/usb/devices/"
-extern char *linux_get_device_info_path(unsigned int location_id);
-extern libusb_device *linux_get_usb_device(libusb_context *ctx, const char *path);
-extern char *linux_get_string_from_cache(libusb_device *dev, const char *cacheID);
+extern int linux_get_device_info_path(char *buf, size_t size, unsigned int location_id);
+extern int linux_get_usb_device(libusb_device *dev, libusb_context *ctx, const char *path);
+#endif
 
 /* ---------------------------------------------------------------------- */
 
-extern char *get_dev_string(libusb_device_handle *hdev, u_int8_t id);
+extern int get_dev_string(char *buf, size_t size, libusb_device_handle *hdev, u_int8_t id);
 extern unsigned int get_location_id(libusb_device *dev);
+extern int get_string_from_cache(char *buf, size_t size, libusb_device *dev, unsigned int referrer);
 
-extern char *get_dev_string(libusb_device_handle *dev, u_int8_t id);
+#ifdef OS_DARWIN
+extern SInt32 GetSInt32CFProperty(io_service_t obj, CFStringRef key);
+extern IOReturn darwin_get_service_from_location_id ( unsigned int location_id, io_service_t *service );
+extern int darwin_get_ioreg_string(char *buf, size_t size, io_service_t service, CFStringRef property);
+#endif /* OS_DARWIN */
 
 /* ---------------------------------------------------------------------- */
 #endif /* _USBMISC_H */

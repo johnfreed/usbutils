@@ -40,6 +40,7 @@
 
 #include "usbmisc.h"
 
+#ifdef OS_LINUX
 /* ---------------------------------------------------------------------- */
 
 static const char *devbususb = "/dev/bus/usb";
@@ -126,10 +127,9 @@ static char *get_absolute_path(const char *path, char *result,
 	return result;
 }
 
-libusb_device *linux_get_usb_device(libusb_context *ctx, const char *path)
+int linux_get_usb_device(libusb_device *dev, libusb_context *ctx, const char *path)
 {
 	libusb_device **list;
-	libusb_device *dev;
 	ssize_t num_devs, i;
 	char device_path[PATH_MAX + 1];
 	char absolute_path[PATH_MAX + 1];
@@ -153,24 +153,21 @@ libusb_device *linux_get_usb_device(libusb_context *ctx, const char *path)
 	}
 
 	libusb_free_device_list(list, 0);
-	return dev;
+	return LIBUSB_SUCCESS;
 }
 
-#define MY_STRING_MAX 256
-#define MY_PATH_MAX 4096
-#define MY_PARAM_MAX 64
-
-char *linux_get_device_info_path(unsigned int location_id)
+int linux_get_device_info_path(char *path, size_t size, unsigned int location_id)
 {
 	unsigned int mask;
 	unsigned int busnum;
-	char buf[MY_PARAM_MAX];
-	char *path = malloc(MY_PATH_MAX);
 	int fd;
 	ssize_t r;
 	int i = 0;
 
-	strcpy(path, SBUD);
+	if (size < strlen(SBUD))
+		return 0;
+
+	snprintf(path, size, "%s", SBUD);
 
 	busnum = location_id >> 24;
 	mask = 0x00ffffff;
@@ -179,34 +176,126 @@ char *linux_get_device_info_path(unsigned int location_id)
 	if ( location_id == 0 )
 	{
 		/* root hub is special case */
-		strncat(path, "usb", sizeof(path) - strlen(path) - 1);
+		snprintf(path + strlen(path), size - strlen(path), "%s", "usb");
+
 	}
-	snprintf(path + strlen(path), sizeof(path) - strlen(path) - 1, "%d", busnum);
+	snprintf(path + strlen(path), size - strlen(path), "%d", busnum);
 	for (i=0; i<6; i++) {
 		int next = location_id >> (20 - i*4);
 		if (!next)
 			break;
-		snprintf(path + strlen(path), sizeof(path) - strlen(path) - 1, "%s%d", ((i>0) ? "." : "-" ), next);
+		snprintf(path + strlen(path), size - strlen(path), "%s%d", ((i>0) ? "." : "-" ), next);
 		mask >>= 4;
 		location_id &= mask;
 	}
-	return path;
+	return LIBUSB_SUCCESS;
+}
+#endif
+
+/*
+This call is to get a cached descriptor string, and thus is OS-dependent.
+It is not for use in two special cases that are not in the descriptors:
+	libusb_get_device_speed
+	libusb_get_kernel_driver_name
+*/
+#ifdef OS_LINUX
+int get_string_from_cache(char *buf, size_t size, libusb_device *dev, unsigned int referrer)
+{
+	/* referrer is something like LIBUSB_DEVICE_BCDUSB */
+	/* return is length of string in buf */
+	const char *cacheID;
+	int fd, r;
+	unsigned int location_id;
+	char path[MY_PATH_MAX];
+
+	if (size < 1)
+		return LIBUSB_SUCCESS;
+	*buf = 0;
+	path[0] = '\0';
+	location_id = get_location_id(dev);
+
+	linux_get_device_info_path(path, sizeof(path), location_id);
+	snprintf(path + strlen(path), size - strlen(path), "%s", "/");
+
+	switch (referrer) {
+	case LIBUSB_HUB_N_NBRPORTS:
+		cacheID = "/maxchild"; break;
+	case LIBUSB_DEVICE_BCD_DEVICE:
+		cacheID = "/bcdDevice"; break;
+	case LIBUSB_CONFIG_B_CONFIGURATIONVALUE:
+		cacheID = "/bConfigurationValue"; break;
+	case LIBUSB_DEVICE_B_DEVICECLASS:
+		cacheID = "/bDeviceClass"; break;
+	case LIBUSB_DEVICE_B_DEVICEPROTOCOL:
+		cacheID = "/bDeviceProtocol"; break;
+	case LIBUSB_DEVICE_B_DEVICESUBCLASS:
+		cacheID = "/bDeviceSubClass"; break;
+	case LIBUSB_CONFIG_BM_ATTRIBUTES:
+		cacheID = "/bmAttributes"; break;
+	case LIBUSB_DEVICE_B_MAXPACKETSIZE0:
+		cacheID = "/bMaxPacketSize0"; break;
+	case LIBUSB_CONFIG_B_MAXPOWER:
+		cacheID = "/bMaxPower"; break;
+	case LIBUSB_DEVICE_B_NUMCONFIGURATIONS:
+		cacheID = "/bNumConfigurations"; break;
+	case LIBUSB_CONFIG_B_NUMINTERFACES:
+		cacheID = "/bNumInterfaces"; break;
+	case LIBUSB_CONFIG_S_CONFIGURATION:
+		cacheID = "/configuration"; break;
+	case LIBUSB_DEVICE_ID_PRODUCT:
+		cacheID = "/idProduct"; break;
+	case LIBUSB_DEVICE_ID_VENDOR:
+		cacheID = "/idVendor"; break;
+	case LIBUSB_DEVICE_BCD_USB:
+		cacheID = "/version"; break;
+	case LIBUSB_DEVICE_S_MANUFACTURER:
+		cacheID = "/manufacturer"; break;
+	case LIBUSB_DEVICE_S_PRODUCT:
+		cacheID = "/product"; break;
+	case LIBUSB_DEVICE_S_SERIALNUMBER:
+		cacheID = "/serial"; break;
+	case LIBUSB_ENDPOINT_B_ENDPOINTADDRESS:
+		cacheID = "/ep00/bEndpointAddress"; break;
+	case LIBUSB_ENDPOINT_B_INTERVAL:
+		cacheID = "/ep00/bInterval"; break;
+	case LIBUSB_ENDPOINT_B_LENGTH:
+		cacheID = "/ep00/bLength"; break;
+	case LIBUSB_ENDPOINT_BM_ATTRIBUTES:
+		cacheID = "/ep00/bmAttributes"; break;
+	case LIBUSB_ENDPOINT_W_MAXPACKETSIZE:
+		cacheID = "/ep00/wMaxPacketSize"; break; /* hex */
+	}
+
+	strncat(path, cacheID, sizeof(path) - strlen(path) - 1);
+	fd = open(path, O_RDONLY);
+	if (fd < 0)
+		return 0;
+	r = read(fd, buf, size - 1);
+	close(fd);
+	if (r < 0)
+		return 0;
+
+	/* buf has \n appended */
+	if (r < 2)
+		return 0;
+
+	buf[r - 1] = '\0';
+	return strlen(buf);
 }
 
-static char *get_dev_string_ascii(libusb_device_handle *dev, size_t size,
-                                  u_int8_t id)
+#endif
+
+static void get_dev_string_ascii(char *buf, size_t size, libusb_device_handle *dev,
+				  u_int8_t id)
 {
-	char *buf = malloc(size);
 	int ret = libusb_get_string_descriptor_ascii(dev, id,
 	                                             (unsigned char *) buf,
 	                                             size);
 
 	if (ret < 0) {
-		free(buf);
-		return strdup("(error)");
+		snprintf(buf, size, "%s", "(error)");
 	}
 
-	return buf;
 }
 
 #if defined(HAVE_NL_LANGINFO) && defined(HAVE_ICONV)
@@ -235,7 +324,7 @@ static char *usb_string_to_native(char * str, size_t len)
 	result = result_end = malloc(out_bytes_left + 1);
 
 	num_converted = iconv(conv, &str, &in_bytes_left,
-	                      &result_end, &out_bytes_left);
+			      &result_end, &out_bytes_left);
 
 	iconv_close(conv);
 	if (num_converted == (size_t) -1) {
@@ -248,74 +337,42 @@ static char *usb_string_to_native(char * str, size_t len)
 }
 #endif
 
-char *linux_get_string_from_cache(libusb_device *dev, const char *cacheID)
-{
-	char *tmp;
-	char *valstr;
-	int fd, r;
-	unsigned int location_id;
-
-	char buf[MY_PARAM_MAX];
-	char path[MY_PATH_MAX];
-
-	valstr = malloc(128);
-	memset(valstr, '\0', 128);
-	path[0] = '\0';
-	location_id = get_location_id(dev);
-
-	tmp = linux_get_device_info_path(location_id);
-	strncat(path, tmp, sizeof(path) - strlen(path) - 1);
-	free(tmp);
-	strncat(path, "/", sizeof(path) - strlen(path) - 1);
-	strncat(path, cacheID, sizeof(path) - strlen(path) - 1);
-	fd = open(path, O_RDONLY);
-	if (fd < 0) {
-		return NULL;
-	}
-	r = read(fd, buf, sizeof(buf) - 1);
-	close(fd);
-	if (r < 0) {
-		return NULL;
-	}
-
-	/* buf has \n appended */
-	if (r < 2)
-		return "";
-	buf[r - 1] = '\0';
-	strncpy(valstr, buf, 127); /* always leave room for the terminator */
-	return valstr;
-}
-
-char *get_dev_string(libusb_device_handle *dev, u_int8_t id)
+int get_dev_string(char *buf, size_t size, libusb_device_handle *hdev, u_int8_t id)
 {
 #if defined(HAVE_NL_LANGINFO) && defined(HAVE_ICONV)
 	int ret;
-	char *buf, unicode_buf[254];
+	unsigned char unicode_buf[254];
 	u_int16_t langid;
 #endif
 
-	if (!dev || !id) return strdup("");
-
+	if (!hdev || !id) {
+		return 0;
+	}
 #if defined(HAVE_NL_LANGINFO) && defined(HAVE_ICONV)
-	langid = get_any_langid(dev);
-	if (!langid) return strdup("(error)");
+	langid = get_any_langid(hdev);
+	if (!langid) {
+		return snprintf(buf, size, "%s", "(error)");
+	}
 
-	ret = libusb_get_string_descriptor(dev, id, langid,
-	                                   (unsigned char *) unicode_buf,
-	                                   sizeof unicode_buf);
-	if (ret < 2) return strdup("(error)");
+	ret = libusb_get_string_descriptor(hdev, id, langid,
+					   (unsigned char *) unicode_buf,
+					   sizeof unicode_buf);
+	if (ret < 2) {
+		return snprintf(buf, size, "%s", "(error)");
+	}
+	char *tmp = usb_string_to_native(unicode_buf + 2,
+				   ((unsigned char) unicode_buf[0] - 2) / 2);
 
-	if (unicode_buf[0] < 2 || unicode_buf[1] != LIBUSB_DT_STRING)
-		return strdup("(error)");
-
-	buf = usb_string_to_native(unicode_buf + 2,
-	                           ((unsigned char) unicode_buf[0] - 2) / 2);
-
-	if (!buf) return get_dev_string_ascii(dev, 127, id);
-
-	return buf;
+	if (tmp) {
+		snprintf(buf, size, "%s", tmp);
+		free(tmp);
+	} else {
+		get_dev_string_ascii(buf, size, hdev, id);
+	}
+	return strlen(buf);
 #else
-	return get_dev_string_ascii(dev, 127, id);
+	get_dev_string_ascii(buf, size, hdev, id);
+	return strlen(buf);
 #endif
 }
 
@@ -331,4 +388,159 @@ unsigned int get_location_id(libusb_device *dev)
 	location_id |= (libusb_get_bus_number(dev) << 24);
 	return location_id;
 }
+
+#ifdef OS_DARWIN
+SInt32 GetSInt32CFProperty(io_service_t obj, CFStringRef key)
+{
+	SInt32 value = 0;
+
+	CFNumberRef valueRef = IORegistryEntryCreateCFProperty(obj, key, kCFAllocatorDefault, 0);
+	if (valueRef) {
+		CFNumberGetValue(valueRef, kCFNumberSInt32Type, &value);
+		CFRelease(valueRef);
+	}
+	return value;
+}
+
+UInt32 GetLocationID(io_service_t obj);
+
+UInt32 GetLocationID(io_service_t obj) {
+	return (UInt32) GetSInt32CFProperty(obj, CFSTR(kUSBDevicePropertyLocationID));
+}
+
+IOReturn darwin_get_service_from_location_id ( unsigned int location_id, io_service_t *service )
+{
+	io_iterator_t deviceIterator;
+	unsigned int found_location_id;
+
+	CFMutableDictionaryRef matchingDict = IOServiceMatching(kIOUSBDeviceClassName);
+
+	if (!matchingDict)
+		return kIOReturnError;
+
+	IOServiceGetMatchingServices(kIOMasterPortDefault, matchingDict, &deviceIterator);
+
+	while ((*service = IOIteratorNext (deviceIterator))) {
+		/* get the location from the i/o registry */
+
+		found_location_id = GetLocationID(*service);
+
+		if (location_id == found_location_id) {
+		  found_location_id = GetLocationID(*service);
+		  IOObjectRelease(deviceIterator);
+		  return kIOReturnSuccess;
+		}
+	}
+	/* not found, shouldn't happen */
+	IOObjectRelease(deviceIterator);
+	return kIOReturnError;
+}
+
+
+int get_string_from_cache(char *buf, size_t size, libusb_device *dev, unsigned int referrer)
+{
+	CFStringRef property;
+	unsigned int location_id;
+	io_service_t service;
+	unsigned int typeID; /* either the base of the number, or 0 for string */
+	unsigned int child; /* if it's a child property, indicate here */
+
+	if (size < 1)
+		return LIBUSB_SUCCESS;
+	*buf = 0;
+
+	child = 0;
+	typeID = 0;
+
+	switch (referrer) {
+	case LIBUSB_DEVICE_B_MAXPACKETSIZE0:
+		typeID = 16; property = CFSTR("bMaxPacketSize0"); break;
+	case LIBUSB_DEVICE_ID_PRODUCT:
+		typeID = 16; property = CFSTR("idProduct"); break;
+	case LIBUSB_DEVICE_ID_VENDOR:
+		typeID = 16; property = CFSTR("idVendor"); break;
+	case LIBUSB_DEVICE_BCD_USB:
+		typeID = 16; property = CFSTR("bcdUSB"); break;
+	case LIBUSB_DEVICE_S_MANUFACTURER:
+		typeID = 0; property = CFSTR("USB Vendor Name"); break;
+	case LIBUSB_DEVICE_S_PRODUCT:
+		typeID = 0; property = CFSTR("USB Product Name"); break;
+	case LIBUSB_DEVICE_S_SERIALNUMBER:
+		typeID = 0; property = CFSTR("USB Serial Number"); break;
+	case LIBUSB_DEVICE_BCD_DEVICE:
+		typeID = 16; property = CFSTR("bcdDevice"); break;
+	case LIBUSB_CONFIG_B_CONFIGURATIONVALUE:
+		child = 1; typeID = 16; property = CFSTR("bConfigurationValue"); break;
+	case LIBUSB_INTERFACE_B_INTERFACENUMBER:
+		child = 1; typeID = 16; property = CFSTR("bInterfaceNumber"); break;
+	case LIBUSB_INTERFACE_B_ALTERNATESETTING:
+		child = 1; typeID = 16; property = CFSTR("bAlternateSetting"); break;
+	case LIBUSB_INTERFACE_B_NUMENDPOINTS:
+		child = 1; typeID = 16; property = CFSTR("bNumEndpoints"); break;
+	case LIBUSB_INTERFACE_B_INTERFACECLASS:
+		child = 1; typeID = 16; property = CFSTR("bInterfaceClass"); break;
+	case LIBUSB_INTERFACE_B_INTERFACESUBCLASS:
+		child = 1; typeID = 16; property = CFSTR("bInterfaceSubClass"); break;
+	case LIBUSB_INTERFACE_B_INTERFACEPROTOCOL:
+		child = 1; typeID = 16; property = CFSTR("bInterfaceProtocol"); break;
+	case LIBUSB_DEVICE_B_DEVICECLASS:
+		typeID = 16; property = CFSTR("bDeviceClass"); break;
+	case LIBUSB_DEVICE_B_DEVICEPROTOCOL:
+		typeID = 16; property = CFSTR("bDeviceProtocol"); break;
+	case LIBUSB_DEVICE_B_DEVICESUBCLASS:
+		typeID = 16; property = CFSTR("bDeviceSubClass"); break;
+	case LIBUSB_CONFIG_BM_ATTRIBUTES:
+		typeID = 16; property = CFSTR("bmAttributes"); break;
+	case LIBUSB_CONFIG_B_MAXPOWER:
+		typeID = 16; property = CFSTR("Requested Power"); break;
+	case LIBUSB_DEVICE_B_NUMCONFIGURATIONS:
+		typeID = 16; property = CFSTR("bNumConfigurations"); break;
+	case LIBUSB_CONFIG_B_NUMINTERFACES:
+		typeID = 16; property = CFSTR("bNumInterfaces"); break;
+	case LIBUSB_CONFIG_S_CONFIGURATION:
+		typeID = 0; property = CFSTR("Configuration"); break;
+	case LIBUSB_HUB_N_NBRPORTS:
+		typeID = 16; property = CFSTR("Ports"); break;
+	case LIBUSB_HUB_B_HUBCONTRCURRENT:
+		typeID = 16; property = CFSTR("Bus Power Available"); break;
+	}
+
+	location_id = get_location_id(dev);
+	darwin_get_service_from_location_id (location_id, &service);
+	if (typeID == 0) {
+		darwin_get_ioreg_string(buf, size, service, property);
+	} else {
+		if (typeID == 10) {
+			snprintf(buf, size, "%d", (UInt32) GetSInt32CFProperty(service, property));
+		} else if (typeID == 16) {
+			snprintf(buf, size,"%x", (UInt32) GetSInt32CFProperty(service, property));
+		}
+	}
+	return LIBUSB_SUCCESS;
+}
+
+int darwin_get_ioreg_string(char *buff, size_t len, io_service_t service, CFStringRef property) {
+	CFIndex length;
+	CFIndex maxSize;
+
+	if (len < 1)
+		return 0;
+
+	buff[0] = '\0';
+	CFStringRef cfBuff = (CFStringRef)IORegistryEntryCreateCFProperty (service, property, kCFAllocatorDefault, 0);
+	if (cfBuff) {
+	        length = CFStringGetLength(cfBuff);
+	        maxSize = CFStringGetMaximumSizeForEncoding(length, kCFStringEncodingUTF8);
+	        char *utf_buff = malloc(maxSize);
+	        CFStringGetCString(cfBuff, utf_buff, maxSize, kCFStringEncodingUTF8);
+	        CFRelease(cfBuff);
+		strncpy(buff, utf_buff, len);
+		free(utf_buff);
+	}
+
+	return strlen(buff);
+}
+
+
+#endif /* OS_DARWIN */
 

@@ -147,110 +147,103 @@ static const char *hwdb_get(const char *modalias, const char *key)
 }
 #endif
 
-const char *names_vendor(libusb_device *dev)
+
+int get_vendor_string(char *buf, size_t size, libusb_device *dev)
 {
+	/* return value is length of string in buf */
+
 	u_int16_t vendorid;
-	char *vendorName;
 	struct libusb_device_descriptor desc;
+	const char *vendorName;
+
+	if (size < 1)
+		return 0;
+	*buf = 0;
 
 	libusb_get_device_descriptor(dev, &desc);
 	vendorid = desc.idVendor;
 #ifdef USE_UDEV
 	char modalias[64];
 	sprintf(modalias, "usb:v%04Xp%04X*", vendorid);
-	return hwdb_get(modalias, "ID_VENDOR_FROM_DATABASE");
+	return snprintf(buf, size, "%s", hwdb_get(modalias, "ID_VENDOR_FROM_DATABASE"));
 #endif
 	/* since iManufacturer theoretically gives the OEM and the vendorID gives the vendor, try the lookup table first */
-	vendorName = (char *)names_genericstrtable(vendors_hash, vendorid);
-	if (vendorName)
-		return (const char *)vendorName;
-fprintf(stderr,"did not get vendor name\n");
-	vendorName = malloc(128);
-	memset(vendorName, '\0', 128);
+	vendorName = names_genericstrtable(vendors_hash, vendorid);
+	int r = snprintf(buf, size, "%s", vendorName);
+	if (r > 0)
+		return r;
+#ifdef OS_LINUX
 	/* lookup failed, so try to get name from /sys/bus/usb/devices */
 	char *tmp;
-	tmp = linux_get_string_from_cache(dev, "manufacturer");
-	if (!tmp) {
-		return strdup("");
-	}
-	strncpy(vendorName, tmp, 127); /* always leave room for the terminator */
-	free(tmp);
-	return (const char*)vendorName;
+	get_string_from_cache(tmp, 128, dev, LIBUSB_DEVICE_S_MANUFACTURER);
+	return snprintf(buf, size, "%s", tmp);
+#endif
+#ifdef OS_DARWIN
+	/* lookup failed, so try to get name from IORegistry */
+	int vid = (int)vendorid;
+	CFMutableDictionaryRef matchingDict;
+	CFNumberRef refVendorId = CFNumberCreate(NULL, kCFNumberIntType, &vid);
+	matchingDict = IOServiceMatching(kIOUSBDeviceClassName);
+	CFDictionarySetValue (matchingDict, CFSTR(kUSBVendorID), refVendorId);
+	CFRelease(refVendorId);
+	CFDictionarySetValue (matchingDict, CFSTR(kUSBProductID), CFSTR("*"));
+	io_service_t device = IOServiceGetMatchingService(kIOMasterPortDefault, matchingDict);
+	darwin_get_ioreg_string(buf, size, device, CFSTR(kUSBVendorString));
+	IOObjectRelease(device);
+	return strlen(buf);
+#endif
+	return 0;
 }
 
-/* names_product
+/* get_product_string
  * Use the device descriptor to try to find the name of the product.
  * If USE_UDEV is defined, then look in the udev hardware database.
  * If USE_UDEV is undefined and hdev is NULL, return a null string.
- * If USE_UDEV is undefined but hdev is passed, return the iProduct string. */
-const char *names_product(libusb_device *dev)
+ * If USE_UDEV is undefined but hdev is passed, return the iProduct string.
+ * return value is length of string in buf */
+
+int get_product_string(char *buf, size_t size, libusb_device *dev)
 {
-	u_int16_t vendorid, productid;
-	int r;
 	struct libusb_device_descriptor desc;
+	
+	if (size < 1)
+		return 0;
+	*buf = 0;
+#ifdef USE_UDEV
+	u_int16_t vendorid, productid;
 
 	libusb_get_device_descriptor(dev, &desc);
 	vendorid = desc.idVendor;
 	productid = desc.idProduct;
-
-#ifdef USE_UDEV
 	char modalias[64];
 	sprintf(modalias, "usb:v%04Xp%04X*", vendorid, productid);
-	return hwdb_get(modalias, "ID_MODEL_FROM_DATABASE");
+	strncpy(buf, hwdb_get(modalias, "ID_MODEL_FROM_DATABASE"), 128);
+	return strlen(buf);
 #endif
-	char *valstr = malloc(128);
-	memset(valstr, '\0', 128);
 #ifdef OS_LINUX
 	/* try to get name from /sys/bus/usb/devices */
-	char *tmp;
-	tmp = linux_get_string_from_cache(dev, "product");
-	if (!tmp) {
-		return strdup("");
-	}
-	strncpy(valstr, tmp, 127); /* always leave room for the terminator */
-	free(tmp);
-	return (const char*)valstr;
+	get_string_from_cache(buf, 128, dev, LIBUSB_DEVICE_S_PRODUCT);
+	return strlen(buf);
 #endif
 #ifdef OS_DARWIN
-	CFMutableDictionaryRef matchingDict;
-	io_service_t device;
-	io_name_t devName;
-	int vid = (int)vendorid;
-	int pid = (int)productid;
-	CFNumberRef refVendorId = CFNumberCreate(NULL, kCFNumberIntType, &vid);
-	CFNumberRef refProductId = CFNumberCreate(NULL, kCFNumberIntType, &pid);
-
 	/* try to get name from IORegistry */
-	matchingDict = IOServiceMatching(kIOUSBDeviceClassName);
-	CFDictionarySetValue (matchingDict, CFSTR(kUSBVendorID), refVendorId);
-	CFDictionarySetValue (matchingDict, CFSTR(kUSBProductID), refProductId);
-	CFRelease(refVendorId);
-	CFRelease(refProductId);
-
-	device = IOServiceGetMatchingService(kIOMasterPortDefault, matchingDict);
-	IORegistryEntryGetName(device, devName);
-	IOObjectRelease(device);
-
-	if (strcmp((char *)devName, "HubDevice") == 0) {
-		/* special case */
-		strcpy(valstr, "Hub");
-	} else {
-		strncpy(valstr, (char *)devName, 127); /* always leave room for the terminator */
-	}
-	return (const char *)valstr;
+	get_string_from_cache(buf, 128, dev, LIBUSB_DEVICE_S_PRODUCT);
+	return strlen(buf);
 #endif
 
 	/* try to get name from iProduct string */
-	libusb_device_handle *hdev = NULL;
-	(void)libusb_open(dev, &hdev);
-	if (hdev) {
-		char *tmp;
-		tmp = get_dev_string(hdev, desc.iProduct);
-		strncpy(valstr, tmp, 127); /* always leave room for the terminator */
-		free(tmp);
-		return (const char *)valstr;
+	if (dev) {
+		int r;
+		libusb_device_handle *hdev;
+		if (libusb_open(dev,&hdev) != LIBUSB_SUCCESS )
+			return 0;
+		if (libusb_get_device_descriptor(dev, &desc) != LIBUSB_SUCCESS)
+			return 0;
+		get_dev_string(buf, size, hdev, desc.iProduct);
+		libusb_close(hdev);
+		return strlen(buf);
 	}
-	return "";
+	return 0;
 }
 
 const char *names_class(u_int8_t classid)
@@ -294,34 +287,6 @@ const char *names_videoterminal(u_int16_t termt)
 
 /* ---------------------------------------------------------------------- */
 
-int get_vendor_string(char *buf, size_t size, libusb_device *dev)
-{
-        const char *cp;
-
-        if (size < 1)
-                return 0;
-        *buf = 0;
-        if (!(cp = names_vendor(dev))) {
-                return 0;
-	}
-	snprintf(buf, size, "%s", cp);
-        return strlen(buf);
-}
-
-int get_product_string(char *buf, size_t size, libusb_device *dev)
-{
-        const char *cp;
-        u_int16_t vid, pid;
-
-        if (size < 1)
-                return 0;
-        *buf = 0;
-        if (!(cp = names_product(dev))) {
-                return 0;
-	}
-	snprintf(buf, size, "%s", cp);
-        return strlen(buf);
-}
 
 int get_class_string(char *buf, size_t size, u_int8_t cls)
 {
