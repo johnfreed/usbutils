@@ -24,11 +24,23 @@
 #define _NAMES_H
 
 #include <sys/types.h>
+#include <libusb.h>
 
 /* ---------------------------------------------------------------------- */
 
-extern const char *names_vendor(u_int16_t vendorid);
-extern const char *names_product(u_int16_t vendorid, u_int16_t productid);
+extern const char *names_vendor(libusb_device *dev);
+extern const char *names_product(libusb_device *dev);
+
+/* extern const char *names_vendor(u_int16_t vendorid); */
+/* extern const char *names_product(libusb_device_handle *hdev, struct libusb_device_descriptor *desc); */
+
+#ifdef OS_DARWIN
+#include <IOKit/IOKitLib.h>
+
+#define SUPPORTS_SS_USB 1
+
+#endif /* OS_DARWIN */
+
 extern const char *names_class(u_int8_t classid);
 extern const char *names_subclass(u_int8_t classid, u_int8_t subclassid);
 extern const char *names_protocol(u_int8_t classid, u_int8_t subclassid,
@@ -44,8 +56,9 @@ extern const char *names_physdes(u_int8_t ph);
 extern const char *names_bias(u_int8_t b);
 extern const char *names_countrycode(unsigned int countrycode);
 
-extern int get_vendor_string(char *buf, size_t size, u_int16_t vid);
-extern int get_product_string(char *buf, size_t size, u_int16_t vid, u_int16_t pid);
+/* extern int get_vendor_string(char *buf, size_t size, u_int16_t vid); */
+extern int get_vendor_string(char *buf, size_t size, struct libusb_device *dev);
+extern int get_product_string(char *buf, size_t size, libusb_device *dev);
 extern int get_class_string(char *buf, size_t size, u_int8_t cls);
 extern int get_subclass_string(char *buf, size_t size, u_int8_t cls, u_int8_t subcls);
 

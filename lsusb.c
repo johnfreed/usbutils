@@ -21,7 +21,9 @@
 
 /*****************************************************************************/
 
+#ifdef HAVE_CONFIG_H
 #include "config.h"
+#endif
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
@@ -245,11 +247,9 @@ static void dump_junk(const unsigned char *buf, const char *indent, unsigned int
  * General config descriptor dump
  */
 
-static void dump_device(
-	libusb_device_handle *dev,
-	struct libusb_device_descriptor *descriptor
-)
+static void dump_device(libusb_device *dev)
 {
+	struct libusb_device_descriptor descriptor;
 	char vendor[128], product[128];
 	char cls[128], subcls[128], proto[128];
 	char *mfg, *prod, *serial;
@@ -257,30 +257,36 @@ static void dump_device(
 	char bcdUSB_flag[15];
 #endif
 
-	get_vendor_string(vendor, sizeof(vendor), descriptor->idVendor);
-	get_product_string(product, sizeof(product),
-			descriptor->idVendor, descriptor->idProduct);
-	get_class_string(cls, sizeof(cls), descriptor->bDeviceClass);
+	libusb_get_device_descriptor(dev, &descriptor);
+	if (get_vendor_string(vendor, sizeof(vendor), dev) == 0)
+		strcpy(vendor, "Unknown Vendor");
+	get_product_string(product, sizeof(product), dev);
+	get_class_string(cls, sizeof(cls), descriptor.bDeviceClass);
 	get_subclass_string(subcls, sizeof(subcls),
-			descriptor->bDeviceClass, descriptor->bDeviceSubClass);
-	get_protocol_string(proto, sizeof(proto), descriptor->bDeviceClass,
-			descriptor->bDeviceSubClass, descriptor->bDeviceProtocol);
-
-	mfg = get_dev_string(dev, descriptor->iManufacturer);
-	prod = get_dev_string(dev, descriptor->iProduct);
-	serial = get_dev_string(dev, descriptor->iSerialNumber);
-
+			descriptor.bDeviceClass, descriptor.bDeviceSubClass);
+	get_protocol_string(proto, sizeof(proto), descriptor.bDeviceClass,
+			descriptor.bDeviceSubClass, descriptor.bDeviceProtocol);
+	libusb_device_handle *udev = NULL;
+	int ret = libusb_open(dev, &udev);
+	if (ret) {
+		fprintf(stderr, "Couldn't open device, some information "
+			"will be missing\n");
+		udev = NULL;
+	}
+	mfg = get_dev_string(udev, descriptor.iManufacturer);
+	prod = get_dev_string(udev, descriptor.iProduct);
+	serial = get_dev_string(udev, descriptor.iSerialNumber);
 #ifdef OS_DARWIN
 	bcdUSB_flag[0] = '\0';
-	if (descriptor->bcdUSB == 0x0000)
+	if (descriptor.bcdUSB == 0x0000)
 		strcpy(bcdUSB_flag, " (estimated)");
-		int devSpeed = libusb_get_device_speed(libusb_get_device(dev));
+		int devSpeed = libusb_get_device_speed(dev);
 		switch (devSpeed) {
-		case LIBUSB_SPEED_LOW:          descriptor->bcdUSB = 0x0110; break;
-		case LIBUSB_SPEED_FULL:         descriptor->bcdUSB = 0x0200; break;
-		case LIBUSB_SPEED_HIGH:         descriptor->bcdUSB = 0x0200; break;
-		case LIBUSB_SPEED_SUPER:        descriptor->bcdUSB = 0x0300; break;
-		default:                        descriptor->bcdUSB = 0x0110; /* if all else fails */
+		case LIBUSB_SPEED_LOW:          descriptor.bcdUSB = 0x0110; break;
+		case LIBUSB_SPEED_FULL:         descriptor.bcdUSB = 0x0200; break;
+		case LIBUSB_SPEED_HIGH:         descriptor.bcdUSB = 0x0200; break;
+		case LIBUSB_SPEED_SUPER:        descriptor.bcdUSB = 0x0300; break;
+		default:                        descriptor.bcdUSB = 0x0110; /* if all else fails */
 		}
 #endif
 	printf("Device Descriptor:\n"
@@ -302,21 +308,21 @@ static void dump_device(
 	       "  iProduct            %5u %s\n"
 	       "  iSerial             %5u %s\n"
 	       "  bNumConfigurations  %5u\n",
-	       descriptor->bLength, descriptor->bDescriptorType,
-	       descriptor->bcdUSB >> 8, descriptor->bcdUSB & 0xff,
+	       descriptor.bLength, descriptor.bDescriptorType,
+	       descriptor.bcdUSB >> 8, descriptor.bcdUSB & 0xff,
 #ifdef OS_DARWIN
 	       bcdUSB_flag,
 #endif
-	       descriptor->bDeviceClass, cls,
-	       descriptor->bDeviceSubClass, subcls,
-	       descriptor->bDeviceProtocol, proto,
-	       descriptor->bMaxPacketSize0,
-	       descriptor->idVendor, vendor, descriptor->idProduct, product,
-	       descriptor->bcdDevice >> 8, descriptor->bcdDevice & 0xff,
-	       descriptor->iManufacturer, mfg,
-	       descriptor->iProduct, prod,
-	       descriptor->iSerialNumber, serial,
-	       descriptor->bNumConfigurations);
+	       descriptor.bDeviceClass, cls,
+	       descriptor.bDeviceSubClass, subcls,
+	       descriptor.bDeviceProtocol, proto,
+	       descriptor.bMaxPacketSize0,
+	       descriptor.idVendor, vendor, descriptor.idProduct, product,
+	       descriptor.bcdDevice >> 8, descriptor.bcdDevice & 0xff,
+	       descriptor.iManufacturer, mfg,
+	       descriptor.iProduct, prod,
+	       descriptor.iSerialNumber, serial,
+	       descriptor.bNumConfigurations);
 
 	free(mfg);
 	free(prod);
@@ -671,7 +677,7 @@ static void dump_pipe_desc(const unsigned char *buf)
 		[0xE0 ... 0xEF] = "Vendor specific",
 		[0xF0 ... 0xFF] = "Reserved",
 	};
-	
+
 	if (buf[0] == 4 && buf[1] == 0x24) {
 		printf("        %s (0x%02x)\n", pipe_name[buf[2]], buf[2]);
 	} else {
@@ -3880,23 +3886,16 @@ static void dump_bos_descriptor(libusb_device_handle *fd)
 	}
 }
 
-static void dumpdev(libusb_device *dev)
+static void dumpdev(libusb_device *dev, libusb_device_handle *udev)
 {
-	libusb_device_handle *udev;
 	struct libusb_device_descriptor desc;
 	int i, ret;
 	int otg, wireless;
 
 	otg = wireless = 0;
-	ret = libusb_open(dev, &udev);
-	if (ret) {
-		fprintf(stderr, "Couldn't open device, some information "
-			"will be missing\n");
-		udev = NULL;
-	}
 
 	libusb_get_device_descriptor(dev, &desc);
-	dump_device(udev, &desc);
+	dump_device(dev);
 	if (desc.bcdUSB == 0x0250)
 		wireless = do_wireless(udev);
 	if (desc.bNumConfigurations) {
@@ -3950,22 +3949,31 @@ static void dumpdev(libusb_device *dev)
 static int dump_one_device(libusb_context *ctx, const char *path)
 {
 	libusb_device *dev;
+	libusb_device_handle *udev;
 	struct libusb_device_descriptor desc;
 	char vendor[128], product[128];
+	int ret;
 
-	dev = get_usb_device(ctx, path);
+	dev = linux_get_usb_device(ctx, path);
 	if (!dev) {
-		fprintf(stderr, "Cannot open %s\n", path);
+		fprintf(stderr, "Cannot find %s\n", path);
 		return 1;
 	}
+	ret = libusb_open(dev, &udev);
+	if (ret) {
+		fprintf(stderr, "Couldn't open device, some information "
+			"will be missing\n");
+		udev = NULL;
+	}
 	libusb_get_device_descriptor(dev, &desc);
-	get_vendor_string(vendor, sizeof(vendor), desc.idVendor);
-	get_product_string(product, sizeof(product), desc.idVendor, desc.idProduct);
+	if (get_vendor_string(vendor, sizeof(vendor), dev) == 0)
+		strcpy(vendor, "Unknown Vendor");
+	get_product_string(product, sizeof(product), dev);
 	printf("Device: ID %04x:%04x %s %s\n", desc.idVendor,
 					       desc.idProduct,
 					       vendor,
 					       product);
-	dumpdev(dev);
+	dumpdev(dev, udev);
 	return 0;
 }
 
@@ -3973,9 +3981,10 @@ static int list_devices(libusb_context *ctx, int busnum, int devnum, int vendori
 {
 	libusb_device **list;
 	struct libusb_device_descriptor desc;
-	char vendor[128], product[128];
+	char vendor[128], product[128], cls[128], subcls[128];
 	int status;
 	ssize_t num_devs, i;
+	int ret;
 
 	status = 1; /* 1 device not found, 0 device found */
 
@@ -3985,20 +3994,39 @@ static int list_devices(libusb_context *ctx, int busnum, int devnum, int vendori
 
 	for (i = 0; i < num_devs; ++i) {
 		libusb_device *dev = list[i];
+		libusb_device_handle *udev = NULL;
 		uint8_t bnum = libusb_get_bus_number(dev);
 		uint8_t dnum = libusb_get_device_address(dev);
 
 		if ((busnum != -1 && busnum != bnum) ||
 		    (devnum != -1 && devnum != dnum))
 			continue;
-		libusb_get_device_descriptor(dev, &desc);
+		if (0 != libusb_get_device_descriptor(dev, &desc))
+			continue;
 		if ((vendorid != -1 && vendorid != desc.idVendor) ||
 		    (productid != -1 && productid != desc.idProduct))
 			continue;
 		status = 0;
-		get_vendor_string(vendor, sizeof(vendor), desc.idVendor);
-		get_product_string(product, sizeof(product),
-				desc.idVendor, desc.idProduct);
+		if (get_vendor_string(vendor, sizeof(vendor), dev) == 0)
+			strcpy(vendor, "Unknown Vendor");
+
+		ret = libusb_open(dev, &udev);
+		if (ret) {
+			udev = NULL;
+		}
+		if (get_product_string(product, sizeof(product), dev) == 0) {
+			if (desc.bDeviceClass > 0 && desc.bDeviceClass < 0xff) {
+				/* print subclass (unless "Unused") and class */
+				get_class_string(cls, sizeof(cls), desc.bDeviceClass);
+				get_subclass_string(subcls, sizeof(subcls),
+					       desc.bDeviceClass, desc.bDeviceSubClass);
+				if (strcmp(subcls,"Unused") != 0) {
+					strcpy(product,subcls);
+					strcat(product," ");
+				}
+				strcat(product, cls);
+			}
+		}
 		if (verblevel > 0)
 			printf("\n");
 		printf("Bus %03u Device %03u: ID %04x:%04x %s %s\n",
@@ -4007,7 +4035,7 @@ static int list_devices(libusb_context *ctx, int busnum, int devnum, int vendori
 				desc.idProduct,
 				vendor, product);
 		if (verblevel > 0)
-			dumpdev(dev);
+			dumpdev(dev, udev);
 	}
 
 	libusb_free_device_list(list, 0);
@@ -4100,14 +4128,14 @@ int main(int argc, char *argv[])
 			"List USB devices\n"
 			"  -v, --verbose\n"
 			"      Increase verbosity (show descriptors)\n"
-			"  -s [[bus]:][devnum]\n"
+			"  -s [[busnum]:][devnum]\n"
 			"      Show only devices with specified device and/or\n"
 			"      bus numbers (in decimal)\n"
 			"  -d vendor:[product]\n"
 			"      Show only devices with the specified vendor and\n"
 			"      product ID numbers (in hexadecimal)\n"
 #ifdef OS_LINUX
-			"  -D device\n"
+			"  -D /dev/bus/usb/busnum/devnum\n"
 			"      Selects which device lsusb will examine\n"
 #endif
 			"  -t, --tree\n"

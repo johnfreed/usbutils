@@ -35,10 +35,14 @@
 #include <stdio.h>
 #include <ctype.h>
 
+#ifdef USE_UDEV
 #include <libudev.h>
+#endif
 
 #include "usb-spec.h"
+#include "usb-vendors.h"
 #include "names.h"
+#include "usbmisc.h"
 
 
 #define HASH1  0x10
@@ -57,8 +61,10 @@ static unsigned int hashnum(unsigned int num)
 
 /* ---------------------------------------------------------------------- */
 
+#ifdef USE_UDEV
 static struct udev *udev = NULL;
 static struct udev_hwdb *hwdb = NULL;
+#endif
 static struct audioterminal *audioterminals_hash[HASHSZ] = { NULL, };
 static struct videoterminal *videoterminals_hash[HASHSZ] = { NULL, };
 static struct genericstrtable *hiddescriptors_hash[HASHSZ] = { NULL, };
@@ -69,6 +75,11 @@ static struct genericstrtable *physdess_hash[HASHSZ] = { NULL, };
 static struct genericstrtable *hutus_hash[HASHSZ] = { NULL, };
 static struct genericstrtable *langids_hash[HASHSZ] = { NULL, };
 static struct genericstrtable *countrycodes_hash[HASHSZ] = { NULL, };
+static struct genericstrtable *classes_hash[HASHSZ] = { NULL, };
+static struct genericstrtable *subclasses_hash[HASHSZ] = { NULL, };
+static struct genericstrtable *protocols_hash[HASHSZ] = { NULL, };
+static struct genericstrtable *vendors_hash[HASHSZ] = { NULL, };
+
 
 /* ---------------------------------------------------------------------- */
 
@@ -123,6 +134,7 @@ const char *names_countrycode(unsigned int countrycode)
 	return names_genericstrtable(countrycodes_hash, countrycode);
 }
 
+#ifdef USE_UDEV
 static const char *hwdb_get(const char *modalias, const char *key)
 {
 	struct udev_list_entry *entry;
@@ -133,45 +145,129 @@ static const char *hwdb_get(const char *modalias, const char *key)
 
 	return NULL;
 }
+#endif
 
-const char *names_vendor(u_int16_t vendorid)
+const char *names_vendor(libusb_device *dev)
 {
-	char modalias[64];
+	u_int16_t vendorid;
+	char *vendorName;
+	struct libusb_device_descriptor desc;
 
-	sprintf(modalias, "usb:v%04X*", vendorid);
+	libusb_get_device_descriptor(dev, &desc);
+	vendorid = desc.idVendor;
+#ifdef USE_UDEV
+	char modalias[64];
+	sprintf(modalias, "usb:v%04Xp%04X*", vendorid);
 	return hwdb_get(modalias, "ID_VENDOR_FROM_DATABASE");
+#endif
+	/* since iManufacturer theoretically gives the OEM and the vendorID gives the vendor, try the lookup table first */
+	vendorName = (char *)names_genericstrtable(vendors_hash, vendorid);
+	if (vendorName)
+		return (const char *)vendorName;
+fprintf(stderr,"did not get vendor name\n");
+	vendorName = malloc(128);
+	memset(vendorName, '\0', 128);
+	/* lookup failed, so try to get name from /sys/bus/usb/devices */
+	char *tmp;
+	tmp = linux_get_string_from_cache(dev, "manufacturer");
+	if (!tmp) {
+		return strdup("");
+	}
+	strncpy(vendorName, tmp, 127); /* always leave room for the terminator */
+	free(tmp);
+	return (const char*)vendorName;
 }
 
-const char *names_product(u_int16_t vendorid, u_int16_t productid)
+/* names_product
+ * Use the device descriptor to try to find the name of the product.
+ * If USE_UDEV is defined, then look in the udev hardware database.
+ * If USE_UDEV is undefined and hdev is NULL, return a null string.
+ * If USE_UDEV is undefined but hdev is passed, return the iProduct string. */
+const char *names_product(libusb_device *dev)
 {
-	char modalias[64];
+	u_int16_t vendorid, productid;
+	int r;
+	struct libusb_device_descriptor desc;
 
+	libusb_get_device_descriptor(dev, &desc);
+	vendorid = desc.idVendor;
+	productid = desc.idProduct;
+
+#ifdef USE_UDEV
+	char modalias[64];
 	sprintf(modalias, "usb:v%04Xp%04X*", vendorid, productid);
 	return hwdb_get(modalias, "ID_MODEL_FROM_DATABASE");
+#endif
+	char *valstr = malloc(128);
+	memset(valstr, '\0', 128);
+#ifdef OS_LINUX
+	/* try to get name from /sys/bus/usb/devices */
+	char *tmp;
+	tmp = linux_get_string_from_cache(dev, "product");
+	if (!tmp) {
+		return strdup("");
+	}
+	strncpy(valstr, tmp, 127); /* always leave room for the terminator */
+	free(tmp);
+	return (const char*)valstr;
+#endif
+#ifdef OS_DARWIN
+	CFMutableDictionaryRef matchingDict;
+	io_service_t device;
+	io_name_t devName;
+	int vid = (int)vendorid;
+	int pid = (int)productid;
+	CFNumberRef refVendorId = CFNumberCreate(NULL, kCFNumberIntType, &vid);
+	CFNumberRef refProductId = CFNumberCreate(NULL, kCFNumberIntType, &pid);
+
+	/* try to get name from IORegistry */
+	matchingDict = IOServiceMatching(kIOUSBDeviceClassName);
+	CFDictionarySetValue (matchingDict, CFSTR(kUSBVendorID), refVendorId);
+	CFDictionarySetValue (matchingDict, CFSTR(kUSBProductID), refProductId);
+	CFRelease(refVendorId);
+	CFRelease(refProductId);
+
+	device = IOServiceGetMatchingService(kIOMasterPortDefault, matchingDict);
+	IORegistryEntryGetName(device, devName);
+	IOObjectRelease(device);
+
+	if (strcmp((char *)devName, "HubDevice") == 0) {
+		/* special case */
+		strcpy(valstr, "Hub");
+	} else {
+		strncpy(valstr, (char *)devName, 127); /* always leave room for the terminator */
+	}
+	return (const char *)valstr;
+#endif
+
+	/* try to get name from iProduct string */
+	libusb_device_handle *hdev = NULL;
+	(void)libusb_open(dev, &hdev);
+	if (hdev) {
+		char *tmp;
+		tmp = get_dev_string(hdev, desc.iProduct);
+		strncpy(valstr, tmp, 127); /* always leave room for the terminator */
+		free(tmp);
+		return (const char *)valstr;
+	}
+	return "";
 }
 
 const char *names_class(u_int8_t classid)
 {
-	char modalias[64];
-
-	sprintf(modalias, "usb:v*p*d*dc%02X*", classid);
-	return hwdb_get(modalias, "ID_USB_CLASS_FROM_DATABASE");
+	return names_genericstrtable(classes_hash, classid);
 }
 
 const char *names_subclass(u_int8_t classid, u_int8_t subclassid)
 {
-	char modalias[64];
-
-	sprintf(modalias, "usb:v*p*d*dc%02Xdsc%02X*", classid, subclassid);
-	return hwdb_get(modalias, "ID_USB_SUBCLASS_FROM_DATABASE");
+	u_int16_t subclass = ( classid << 8 ) + subclassid;
+	return names_genericstrtable(subclasses_hash, subclass);
 }
 
 const char *names_protocol(u_int8_t classid, u_int8_t subclassid, u_int8_t protocolid)
 {
-	char modalias[64];
-
-	sprintf(modalias, "usb:v*p*d*dc%02Xdsc%02Xdp%02X*", classid, subclassid, protocolid);
-	return hwdb_get(modalias, "ID_USB_PROTOCOL_FROM_DATABASE");
+	unsigned int protocol = ( classid << 16 ) + ( subclassid << 8 ) + protocolid;
+	return names_genericstrtable(protocols_hash, protocol);
 }
 
 const char *names_audioterminal(u_int16_t termt)
@@ -198,28 +294,33 @@ const char *names_videoterminal(u_int16_t termt)
 
 /* ---------------------------------------------------------------------- */
 
-int get_vendor_string(char *buf, size_t size, u_int16_t vid)
+int get_vendor_string(char *buf, size_t size, libusb_device *dev)
 {
         const char *cp;
 
         if (size < 1)
                 return 0;
         *buf = 0;
-        if (!(cp = names_vendor(vid)))
+        if (!(cp = names_vendor(dev))) {
                 return 0;
-        return snprintf(buf, size, "%s", cp);
+	}
+	snprintf(buf, size, "%s", cp);
+        return strlen(buf);
 }
 
-int get_product_string(char *buf, size_t size, u_int16_t vid, u_int16_t pid)
+int get_product_string(char *buf, size_t size, libusb_device *dev)
 {
         const char *cp;
+        u_int16_t vid, pid;
 
         if (size < 1)
                 return 0;
         *buf = 0;
-        if (!(cp = names_product(vid, pid)))
+        if (!(cp = names_product(dev))) {
                 return 0;
-        return snprintf(buf, size, "%s", cp);
+	}
+	snprintf(buf, size, "%s", cp);
+        return strlen(buf);
 }
 
 int get_class_string(char *buf, size_t size, u_int8_t cls)
@@ -352,6 +453,14 @@ static int hash_tables(void)
 
 	HASH_EACH(countrycodes, countrycodes_hash);
 
+	HASH_EACH(classes, classes_hash);
+
+	HASH_EACH(subclasses, subclasses_hash);
+
+	HASH_EACH(protocols, protocols_hash);
+
+	HASH_EACH(vendors, vendors_hash);
+
 	return r;
 }
 
@@ -365,6 +474,10 @@ static void print_tables(void)
 	struct videoterminal *vt;
 	struct genericstrtable *li;
 	struct genericstrtable *hu;
+	struct genericstrtable *cl;
+	struct genericstrtable *sc;
+	struct genericstrtable *pr;
+	struct genericstrtable *ve;
 
 
 	printf("--------------------------------------------\n");
@@ -402,7 +515,7 @@ static void print_tables(void)
 	}
 
 	printf("--------------------------------------------\n");
-	printf("\t\t Conutry Codes\n");
+	printf("\t\t Country Codes\n");
 	printf("--------------------------------------------\n");
 
 	for (i = 0; i < HASHSZ; i++) {
@@ -414,6 +527,54 @@ static void print_tables(void)
 	}
 
 	printf("--------------------------------------------\n");
+	printf("\t\t Classes\n");
+	printf("--------------------------------------------\n");
+
+	for (i = 0; i < HASHSZ; i++) {
+		cl = classes_hash[i];
+		if (cl)
+			printf("hash: %d\n", i);
+		for (; cl; cl = cl->next)
+			printf("\tid: %x, entry: %s\n", cl->num, cl->name);
+	}
+
+	printf("--------------------------------------------\n");
+	printf("\t\t Subclasses\n");
+	printf("--------------------------------------------\n");
+
+	for (i = 0; i < HASHSZ; i++) {
+		sc = subclasses_hash[i];
+		if (sc)
+			printf("hash: %d\n", i);
+		for (; sc; sc = sc->next)
+			printf("\tid: %x, entry: %s\n", sc->num, sc->name);
+	}
+
+	printf("--------------------------------------------\n");
+	printf("\t\t Protocols\n");
+	printf("--------------------------------------------\n");
+
+	for (i = 0; i < HASHSZ; i++) {
+		pr = protocols_hash[i];
+		if (pr)
+			printf("hash: %d\n", i);
+		for (; pr; pr = pr->next)
+			printf("\tid: %x, entry: %s\n", pr->num, pr->name);
+	}
+
+	printf("--------------------------------------------\n");
+	printf("\t\t Vendors\n");
+	printf("--------------------------------------------\n");
+
+	for (i = 0; i < HASHSZ; i++) {
+		ve = vendors_hash[i];
+		if (ve)
+			printf("hash: %d\n", i);
+		for (; ve; ve = ve->next)
+			printf("\tid: %x, entry: %s\n", ve->num, ve->name);
+	}
+
+	printf("--------------------------------------------\n");
 }
 */
 
@@ -421,6 +582,7 @@ int names_init(void)
 {
 	int r;
 
+#ifdef USE_UDEV
 	udev = udev_new();
 	if (!udev)
 		r = -1;
@@ -429,6 +591,7 @@ int names_init(void)
 		if (!hwdb)
 			r = -1;
 	}
+#endif
 
 	r = hash_tables();
 
@@ -437,6 +600,8 @@ int names_init(void)
 
 void names_exit(void)
 {
+#ifdef USE_UDEV
 	hwdb = udev_hwdb_unref(hwdb);
 	udev = udev_unref(udev);
+#endif
 }

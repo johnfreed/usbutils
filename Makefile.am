@@ -20,6 +20,7 @@ lsusb_SOURCES = \
 	list.h \
 	names.c names.h \
 	usb-spec.h \
+	usb-vendors.h \
 	usbmisc.c usbmisc.h
 
 lsusb_CPPFLAGS = \

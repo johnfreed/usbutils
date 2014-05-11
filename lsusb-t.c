@@ -43,18 +43,6 @@ static void sort_dev_strings(char *dev_strings[],  int cnt )
 	}
 }
 
-static unsigned int get_location_id(libusb_device *dev) {
-        uint8_t port_numbers[7];
-        int j;
-        int count = libusb_get_port_numbers(dev,port_numbers, 7);
-        unsigned int location_id = 0;
-        for (j = 0; j < count; j++) {
-            location_id |= (port_numbers[j] & 0xf) << (20 - 4*j);
-        }
-        location_id |= (libusb_get_bus_number(dev) << 24);
-        return location_id;
-}
-
 static unsigned int get_maxchild(unsigned int location_id)
 {
 /* nNbrPorts in Hub Descriptor */
